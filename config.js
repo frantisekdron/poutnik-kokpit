@@ -5,8 +5,8 @@ window.CFG = {
   "owner": "frantisekdron",
   "repo": "poutnik-data",
   "branch": "main",
-  "iterace": 600000,
+  "iterace": 1000000,
   "blobs": {
-    "spolecne": null
+    "spolecne": "oeqM5u34X0p9gsnJ1/Dd0BDAENtcgB3qyojJJs4Z4R80w+Zq62MjU4TU7safWidWCmY1sFp0IOqsBfhRmuL+aDcen7mAR8RIKOfObWcPS42MOxk6dqhblMCvPHNHLVMxXMqBvEXaNl+1UFZsL6nnWbzLAI0CNoaDTMgCMBFw45Ie4QyMrew6AwU="
   }
 };
