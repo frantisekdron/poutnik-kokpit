@@ -2123,13 +2123,26 @@ async function prihlasSe(token) {
   }
 }
 
+/* GitHub Pages cachuje soubory 10 minut — po výměně klíče by prohlížeč
+   držel starý config.js. Tohle si ho stáhne čerstvý mimo cache. */
+async function nactiCerstvyConfig() {
+  try {
+    const r = await fetch('config.js?cb=' + Date.now(), { cache: 'no-store' });
+    const txt = await r.text();
+    const cfg = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+    if (cfg.blobs && Object.values(cfg.blobs).some(Boolean)) { window.CFG = cfg; return true; }
+  } catch { /* offline apod. */ }
+  return false;
+}
+
 $('#brana-form').addEventListener('submit', async (u) => {
   u.preventDefault();
   const heslo = $('#brana-heslo').value;
   if (!heslo) return;
   $('#brana-chyba').textContent = '';
   $('#brana-info').textContent = 'Odemykám…';
-  const token = await odemkni(heslo);
+  let token = await odemkni(heslo);
+  if (!token && await nactiCerstvyConfig()) token = await odemkni(heslo);
   $('#brana-info').textContent = '';
   if (!token) { $('#brana-chyba').textContent = 'Špatné heslo.'; return; }
   /* Token zůstává jen v tomhle prohlížeči, svázaný s otiskem klíče. */
@@ -2137,14 +2150,15 @@ $('#brana-form').addEventListener('submit', async (u) => {
   prihlasSe(token);
 });
 
-(function start() {
+(async function start() {
   if (DEMO) {
     zapniDemo();
     JA.jmeno = 'Franta';
     nactiVse().then(() => { spustApp(); });
     return;
   }
-  const maBlob = Object.values(CFG.blobs || {}).some(Boolean);
+  let maBlob = Object.values(CFG.blobs || {}).some(Boolean);
+  if (!maBlob) maBlob = await nactiCerstvyConfig();   /* možná jen stará cache */
   if (!maBlob) {
     $('#brana-form').classList.add('skryto');
     $('#brana-info').innerHTML = 'Kokpit ještě nemá nastavený přístup k datům.<br>' +
