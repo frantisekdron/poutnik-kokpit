@@ -26,12 +26,12 @@ const MESICE = ['leden','únor','březen','duben','květen','červen','červenec
 function denCesky(datum) {
   if (!datum) return '';
   const d = new Date(datum + 'T12:00:00');
-  return Number.isNaN(d.getTime()) ? datum : dtDen.format(d);
+  return Number.isNaN(d.getTime()) ? esc(String(datum)) : dtDen.format(d);
 }
 function denKratce(datum) {
   if (!datum) return '';
   const d = new Date(datum + 'T12:00:00');
-  return Number.isNaN(d.getTime()) ? datum : dtKratce.format(d);
+  return Number.isNaN(d.getTime()) ? esc(String(datum)) : dtKratce.format(d);
 }
 function kdyKratce(iso) {
   const d = new Date(iso);
@@ -57,7 +57,7 @@ function dniRez(od, doD) {
 function pridejDni(datum, n) {
   const d = new Date(datum + 'T12:00:00');
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 const iniciely = (jmeno) => String(jmeno || '?').split(/\s+/).slice(0, 2).map((s) => s[0] || '').join('').toUpperCase();
@@ -112,6 +112,7 @@ const GH = {
   token: null,
   etag: {},
   mezipamet: {},
+  zapisy: 0,
 
   volej: (cesta, nastaveni = {}) => fetch('https://api.github.com' + cesta, {
     cache: 'no-store',
@@ -158,10 +159,10 @@ const GH = {
     const r = await GH.volej(`${GH.cesta(soubor)}?ref=${CFG.branch}`, { headers: hlavicky });
     if (r.status === 304) return { zmeneno: false };
     if (!r.ok) throw await GH.selhalo(r);
-    const et = r.headers.get('etag');
-    if (et) GH.etag[soubor] = et;
     const j = await r.json();
     const data = JSON.parse(b64NaText(j.content));
+    const et = r.headers.get('etag');
+    if (et) GH.etag[soubor] = et;
     GH.mezipamet[soubor] = { data, sha: j.sha };
     return { zmeneno: true, data, sha: j.sha };
   },
@@ -186,6 +187,7 @@ const GH = {
 
       if (r.ok) {
         const j = await r.json();
+        GH.zapisy++;
         delete GH.etag[soubor];
         GH.mezipamet[soubor] = { data: kopie, sha: j.content.sha };
         return kopie;
@@ -260,6 +262,7 @@ const UI = {
   finObdobi: localStorage.getItem('poutnik.finobdobi') || '90',
   ukolFiltr: 'otevreny',
   hledatKontakt: '',
+  prekreslitPoZavreni: false,
   otevreno: null,                            // {typ:'vuz'|'rezervace'|..., id, pod?}
 };
 
@@ -291,10 +294,18 @@ function spustSynchronizaci() {
     try {
       let neco = false;
       for (const soubor of Object.values(SOUBORY)) {
+        const pred = GH.zapisy;
         const v = await GH.nacti(soubor, { podminene: true });
+        /* Během čtení proběhl náš zápis — odpověď může být starší než to,
+           co jsme právě uložili. Celý tik zahodit, příště se čte znovu. */
+        if (GH.zapisy !== pred) { delete GH.etag[soubor]; return; }
         if (v.zmeneno) { prevezmi(soubor, v.data); neco = true; }
       }
-      if (neco) vykresli();
+      /* Do otevřeného šuplíku se pod rukama nesahá — překreslí se po zavření. */
+      if (neco) {
+        if (UI.otevreno) UI.prekreslitPoZavreni = true;
+        else vykresli();
+      }
     } catch { /* offline apod. — příště */ }
   }, 25000);
 }
@@ -339,12 +350,22 @@ const ulozPolozku = (zprava, soubor, id, fn) =>
    VÝPOČTY — odhad km, kontrolky, finance, doporučení
    ============================================================ */
 
+/* Km jedné rezervace pro daný vůz. Nové rezervace mají km per vůz
+   v kmVozy, starší jen skalár kmPred/kmPo (patří prvnímu autu). */
+function kmRez(r, vid) {
+  if (r.kmVozy && r.kmVozy[vid]) return { pred: cislo(r.kmVozy[vid].pred), po: cislo(r.kmVozy[vid].po) };
+  const auta = (r.vozy || []).filter((id) => vuz(id)?.typ !== 'stan');
+  if (auta[0] === vid) return { pred: cislo(r.kmPred), po: cislo(r.kmPo) };
+  return { pred: null, po: null };
+}
+
 /* Kolik km denně vůz reálně najede — kalibrováno z rezervací,
    které mají zapsané km před i po. Jinak odhad z nastavení. */
 function kmNaDen(v) {
   const vzorky = rezervaceVozu(v.id)
-    .filter((r) => cislo(r.kmPred) != null && cislo(r.kmPo) != null && r.kmPo > r.kmPred)
-    .map((r) => (r.kmPo - r.kmPred) / dniRez(r.od, r.do));
+    .map((r) => ({ r, km: kmRez(r, v.id) }))
+    .filter((x) => x.km.pred != null && x.km.po != null && x.km.po > x.km.pred)
+    .map((x) => (x.km.po - x.km.pred) / dniRez(x.r.od, x.r.do));
   if (!vzorky.length) return S.nastaveni.kmDenOdhad || 140;
   return vzorky.reduce((a, b) => a + b, 0) / vzorky.length;
 }
@@ -366,14 +387,18 @@ function odhadKm(v) {
   let presne = true;
   for (const r of rezervaceVozu(v.id)) {
     if (r.stav !== 'vydano' && r.stav !== 'vraceno') continue;
-    const zacatek = r.od > posl.datum ? r.od : null;
+    /* Běžící výpůjčka přirůstá i po zápisu km z vydání. */
+    const zacatek = r.od > posl.datum ? r.od : (r.stav === 'vydano' ? posl.datum : null);
     if (!zacatek) continue;                       // jízda už je v posledním zápisu
-    if (cislo(r.kmPred) != null && cislo(r.kmPo) != null) {
-      km = Math.max(km, +r.kmPo);                 // skutečnost má přednost
+    const kmr = kmRez(r, v.id);
+    if (kmr.pred != null && kmr.po != null) {
+      km = Math.max(km, kmr.po);                  // skutečnost má přednost
     } else {
       const konec = r.stav === 'vydano' ? (dnes < r.do ? dnes : r.do) : r.do;
-      km += denniKm * dniRez(r.od, konec);
-      presne = false;
+      if (konec > zacatek) {
+        km += denniKm * dniRez(zacatek, konec);
+        presne = false;
+      }
     }
   }
   return { km: Math.round(km), presne, od: posl.datum };
@@ -474,7 +499,15 @@ function konflikty() {
 function obdobiRozsah() {
   const dnes = dnesISO();
   const dny = { 30: 30, 90: 90, 365: 365 }[UI.finObdobi];
-  if (UI.finObdobi === 'vse') return { od: '2000-01-01', do: dnes, dnu: null };
+  if (UI.finObdobi === 'vse') {
+    const zaznamy = [
+      ...S.rezervace.map((r) => r.od),
+      ...S.vozy.flatMap((v) => [...(v.servis || []).map((x) => x.datum), ...(v.tachometr || []).map((x) => x.datum)]),
+      ...(S.finance.investice || []).map((i) => i.datum),
+      ...(S.finance.marketing || []).map((m) => m.datum),
+    ].filter(Boolean).sort();
+    return { od: zaznamy[0] || pridejDni(dnes, -30), do: dnes, dnu: null };
+  }
   if (UI.finObdobi === 'rok') return { od: dnes.slice(0, 4) + '-01-01', do: dnes, dnu: dniRez(dnes.slice(0, 4) + '-01-01', dnes) };
   return { od: pridejDni(dnes, -dny), do: dnes, dnu: dny };
 }
@@ -540,7 +573,7 @@ function doporuceni() {
       const skutecnychDnu = pl.obsazeno / 3;   // za měsíc průměrně
       if (skutecnychDnu < pl.breakEvenDnu) rady.push({ vuz: v, text: `pod break-even: fixní náklady ${kc(pl.fixniMesic)}/měs = ${Math.ceil(pl.breakEvenDnu)} dní pronájmu, reálně jede ${Math.round(skutecnychDnu)} dní/měs` });
     }
-    const rezBez = rezervaceVozu(v.id).filter((r) => r.stav === 'vraceno' && (cislo(r.kmPred) == null || cislo(r.kmPo) == null));
+    const rezBez = rezervaceVozu(v.id).filter((r) => { const k = kmRez(r, v.id); return r.stav === 'vraceno' && (k.pred == null || k.po == null); });
     if (rezBez.length) rady.push({ vuz: v, text: `${rezBez.length}× vráceno bez zapsaných km — odhad kilometrů se nemá z čeho učit` });
   }
 
@@ -723,14 +756,16 @@ function zavriSuplik() {
   UI.otevreno = null;
   $('#zaclona').classList.add('skryto');
   $('#suplik').classList.add('skryto');
+  if (UI.prekreslitPoZavreni) { UI.prekreslitPoZavreni = false; vykresli(); }
 }
 
 function pole(def, hodnota) {
   const v = hodnota ?? '';
-  if (def.t === 'textarea') return `<label class="pole"><b>${def.p}</b><textarea data-k="${def.k}" placeholder="${def.ph || ''}">${esc(v)}</textarea></label>`;
-  if (def.t === 'select') return `<label class="pole"><b>${def.p}</b><select data-k="${def.k}">${def.moznosti.map((m) => `<option value="${m.v}" ${String(m.v) === String(v) ? 'selected' : ''}>${m.p}</option>`).join('')}</select></label>`;
+  if (def.t === 'barva') return `<label class="pole"><b>${esc(def.p)}</b><input type="color" data-k="${esc(def.k)}" value="${esc(v || '#8A8F7B')}" style="height:38px;padding:3px"></label>`;
+  if (def.t === 'textarea') return `<label class="pole"><b>${esc(def.p)}</b><textarea data-k="${esc(def.k)}" placeholder="${esc(def.ph || '')}">${esc(v)}</textarea></label>`;
+  if (def.t === 'select') return `<label class="pole"><b>${esc(def.p)}</b><select data-k="${esc(def.k)}" ${def.extra || ''}>${def.moznosti.map((m) => `<option value="${esc(m.v)}" ${String(m.v) === String(v) ? 'selected' : ''}>${esc(m.p)}</option>`).join('')}</select></label>`;
   const typ = def.t === 'cislo' ? 'number' : def.t === 'datum' ? 'date' : 'text';
-  return `<label class="pole"><b>${def.p}</b><input type="${typ}" data-k="${def.k}" value="${esc(v)}" placeholder="${def.ph || ''}" ${def.t === 'cislo' ? 'inputmode="numeric" step="any"' : ''}></label>`;
+  return `<label class="pole"><b>${esc(def.p)}</b><input type="${typ}" data-k="${esc(def.k)}" value="${esc(v)}" placeholder="${esc(def.ph || '')}" ${def.t === 'cislo' ? 'inputmode="numeric" step="any"' : ''}></label>`;
 }
 function sesbirej(kontejner) {
   const o = {};
@@ -797,6 +832,8 @@ function podInfoVozu(v) {
       ${pole({ k: 'cenaDen', p: 'Cena za den (Kč)', t: 'cislo' }, v.cenaDen)}
       ${pole({ k: 'kauce', p: 'Kauce (Kč)', t: 'cislo' }, v.kauce)}
       ${pole({ k: 'aktivni', p: 'Stav', t: 'select', moznosti: [{ v: 'true', p: 'v provozu' }, { v: 'false', p: 'vyřazen / prodán' }] }, String(v.aktivni !== false))}
+      ${pole({ k: 'typ', p: 'Typ', t: 'select', moznosti: [{ v: 'pickup', p: 'pick-up' }, { v: 'obytnak', p: 'obytný vůz' }, { v: 'teren', p: 'terénní vůz' }, { v: 'dodavka', p: 'kempingový vůz / dodávka' }, { v: 'stan', p: 'střešní stan' }] }, v.typ)}
+      ${pole({ k: 'barva', p: 'Barva v kokpitu', t: 'barva' }, v.barva)}
     </div>
     <div class="rada">${pole({ k: 'poznamka', p: 'Poznámka', t: 'textarea' }, v.poznamka)}</div>
   </div>
@@ -868,10 +905,10 @@ function podServis(v) {
         <div class="rada">${pole({ k: 'popis', p: 'Co se dělalo', t: 'textarea', ph: 'výměna oleje, brzdy…' }, z.popis)}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
           ${(z.dokumenty || []).map((d, i) => `
-            <button class="doc-chip" data-akce="otevri-dok" data-id="${z.id}" data-i="${i}" title="${esc(d.nazev)}">
+            <button class="doc-chip" data-akce="otevri-dok" data-id="${z.id}" data-cesta="${esc(d.cesta)}" title="${esc(d.nazev)}">
               <svg class="icon" style="width:13px;height:13px"><use href="#${/\.(jpe?g|png|webp)$/i.test(d.nazev) ? 'i-foto' : 'i-dokument'}"/></svg><span>${esc(d.nazev)}</span>
             </button>
-            <button class="btn mala nic pozor" data-akce="smaz-dok" data-id="${z.id}" data-i="${i}" title="Smazat přílohu"><svg class="icon" style="width:12px;height:12px"><use href="#i-krizek"/></svg></button>`).join('')}
+            <button class="btn mala nic pozor" data-akce="smaz-dok" data-id="${z.id}" data-cesta="${esc(d.cesta)}" title="Smazat přílohu"><svg class="icon" style="width:12px;height:12px"><use href="#i-krizek"/></svg></button>`).join('')}
           <label class="btn mala"><svg class="icon"><use href="#i-foto"/></svg>Přidat fotku / doklad
             <input type="file" accept="image/*,application/pdf" multiple class="skryto" data-akce-file="nahraj-dok" data-id="${z.id}"></label>
           <div style="flex:1"></div>
@@ -908,7 +945,7 @@ function podMilniky(v) {
     ${(v.milniky || []).map((m) => `
       <div class="rada r3" data-id="${m.id}" style="border-bottom:1px solid var(--linka);padding-bottom:10px;align-items:end">
         ${pole({ k: 'nazev', p: 'Co', t: 'text', ph: 'STK, olej, dálniční známka…' }, m.nazev)}
-        ${pole({ k: 'typ', p: 'Hlídat podle', t: 'select', moznosti: [{ v: 'datum', p: 'data' }, { v: 'km', p: 'kilometrů' }] }, m.typ)}
+        ${pole({ k: 'typ', p: 'Hlídat podle', t: 'select', extra: 'data-akce-zmena="milnik-typ"', moznosti: [{ v: 'datum', p: 'data' }, { v: 'km', p: 'kilometrů' }] }, m.typ)}
         ${m.typ === 'km' ? pole({ k: 'hodnota', p: 'Při km', t: 'cislo' }, m.hodnota) : pole({ k: 'hodnota', p: 'Termín', t: 'datum' }, m.hodnota)}
         ${pole({ k: 'pozn', p: 'Poznámka', t: 'text' }, m.pozn)}
         <div style="display:flex;gap:6px">
@@ -1015,6 +1052,7 @@ function kresliKalendar() {
 
 function kresliSuplikRezervace(o) {
   const r = o.id ? S.rezervace.find((x) => x.id === o.id) : null;
+  if (r && !o.otisk) o.otisk = JSON.stringify(r);   /* otisk verze při otevření */
   const n = r || o.predvyplneno || {};
   const s = $('#suplik');
   s.innerHTML = `
@@ -1109,6 +1147,12 @@ async function potvrdDialogKm(rezim, rid) {
     rezim === 'vydej' ? `Vydání vozu — ${jmenoRez(r)}` : `Vrácení vozu — ${jmenoRez(r)}`,
     SOUBORY.rezervace, rid,
     (p) => {
+      p.kmVozy = p.kmVozy || {};
+      for (const v of auta) {
+        const km = cislo(hodnoty['km-' + v.id]);
+        if (km == null) continue;
+        p.kmVozy[v.id] = { ...(p.kmVozy[v.id] || {}), [rezim === 'vydej' ? 'pred' : 'po']: km };
+      }
       if (rezim === 'vydej') { p.stav = 'vydano'; if (cislo(prvniKm) != null) p.kmPred = prvniKm; }
       else { p.stav = 'vraceno'; if (cislo(prvniKm) != null) p.kmPo = prvniKm; }
     });
@@ -1360,8 +1404,8 @@ function kresliUkoly() {
           <button data-akce="ukol-prepni" data-id="${u.id}" title="${u.stav === 'hotovy' ? 'Vrátit mezi otevřené' : 'Hotovo'}" style="display:grid;place-items:center;width:22px;height:22px;border:1.5px solid var(--linka2);border-radius:6px;${u.stav === 'hotovy' ? 'background:var(--zelena);border-color:var(--zelena);color:var(--noc)' : ''}">
             ${u.stav === 'hotovy' ? '<svg class="icon" style="width:13px;height:13px"><use href="#i-fajfka"/></svg>' : ''}
           </button>
-          <span style="${u.stav === 'hotovy' ? 'text-decoration:line-through' : ''}">${esc(u.text)}</span>
-          <span class="stitek">${KATEGORIE[u.kategorie] || u.kategorie}</span>
+          <button style="text-align:left;${u.stav === 'hotovy' ? 'text-decoration:line-through' : ''}" data-akce="uprav-ukol" data-id="${u.id}">${esc(u.text)}</button>
+          <span class="stitek">${esc(KATEGORIE[u.kategorie] || u.kategorie)}</span>
           ${u.vuz && vuz(u.vuz) ? `<span class="stitek plny" style="background:${vuz(u.vuz).barva}">${esc(vuz(u.vuz).nazev.split(' ')[0])}</span>` : ''}
           ${u.priorita === 'vysoka' ? '<span class="stitek" style="color:var(--cervena);border-color:var(--cervena)">důležité</span>' : ''}
           ${u.kdo ? `<span class="stitek">${esc(u.kdo)}</span>` : ''}
@@ -1398,8 +1442,9 @@ function kresliSuplikNastaveni() {
       <div class="blok-hl"><h4>Živý monitoring aut (GPS)</h4><div class="mezera"></div><button class="btn mala hlavni" data-akce="uloz-traccar">Uložit</button></div>
       <p style="font-size:12.5px;color:var(--khaki);margin:0 0 10px">
         Nákup: 4× <b>SinoTrack ST-901L / ST-906L (4G)</b> ~700–900 Kč/ks + datová SIM (~30–50 Kč/měs).
-        Krabičky nasměruj na server <b>Traccar</b> (zdarma, open-source) a sem vlož adresu + token —
-        kokpit pak ukáže skutečnou polohu a km místo odhadu. Do té doby běží odhad z rezervací.</p>
+        Krabičky nasměruj na server <b>Traccar</b> (zdarma, open-source) a sem vlož adresu + token.
+        Kokpit zatím umí spojení ověřit (tlačítko níže); živá poloha a km se napojí, až budou krabičky
+        v autech. Do té doby běží odhad km z rezervací.</p>
       <div class="rada r2">
         ${pole({ k: 'url', p: 'Traccar server (URL)', t: 'text', ph: 'https://demo.traccar.org' }, t.url)}
         ${pole({ k: 'token', p: 'API token', t: 'text' }, t.token)}
@@ -1655,18 +1700,20 @@ async function nahrajDokumenty(vuzId, zaznamId, soubory) {
   }
 }
 
-async function otevriDokument(vuzId, zaznamId, i) {
+async function otevriDokument(vuzId, zaznamId, cesta) {
   const z = (vuz(vuzId)?.servis || []).find((s) => s.id === zaznamId);
-  const dok = z?.dokumenty?.[i];
+  const dok = z?.dokumenty?.find((d) => d.cesta === cesta);
   if (!dok) return;
+  /* Okno otevřít hned v gestu — Safari by ho po await zablokovalo. */
+  const okno = window.open('', '_blank');
   try {
     hlaska('Stahuji…');
     const blob = await GH.stahniSoubor(dok.cesta);
     const typ = /\.pdf$/i.test(dok.nazev) ? 'application/pdf' : 'image/jpeg';
     const url = URL.createObjectURL(new Blob([blob], { type: typ }));
-    window.open(url, '_blank');
+    if (okno) okno.location = url; else window.open(url, '_blank');
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } catch (e) { hlaska(e.message, 'chyba'); }
+  } catch (e) { if (okno) okno.close(); hlaska(e.message, 'chyba'); }
 }
 
 /* ============================================================
@@ -1722,7 +1769,11 @@ document.addEventListener('click', async (u) => {
       if (!hodnoty.od || !hodnoty.do || hodnoty.do < hodnoty.od) return hlaska('Zkontroluj termín od–do.', 'chyba');
       if (!vozyVybrane.length) return hlaska('Vyber aspoň jeden vůz.', 'chyba');
       if (id) {
-        await ulozPolozku('Úprava rezervace', SOUBORY.rezervace, id, (p) => Object.assign(p, hodnoty, { vozy: vozyVybrane }));
+        const ok = await ulozPolozku('Úprava rezervace', SOUBORY.rezervace, id, (p) => {
+          if (o.otisk && JSON.stringify(p) !== o.otisk) throw new Error('Rezervaci mezitím změnil parťák — formulář se obnovil, uprav čerstvou verzi.');
+          Object.assign(p, hodnoty, { vozy: vozyVybrane });
+        });
+        if (!ok) { o.otisk = null; kresliSuplik(); return; }
       } else {
         await uloz('Nová rezervace — ' + (hodnoty.jmeno || kontakt(hodnoty.kontakt)?.jmeno || 'bez jména'), SOUBORY.rezervace, (d) => {
           d.polozky = d.polozky || [];
@@ -1753,37 +1804,41 @@ document.addEventListener('click', async (u) => {
     'uloz-leasing': () => ulozVuz('Leasing upraven', o.id, (v) => { v.leasing = { ...v.leasing, ...sesbirej(el.closest('.blok')) }; }),
 
     'pridej-pojisteni': () => ulozVuz('Nová pojistka', o.id, (v) => { v.pojisteni = v.pojisteni || []; v.pojisteni.push({ id: uid('po'), druh: '', spolecnost: '', cisloSmlouvy: '', rocne: null, platiDo: '', pozn: '' }); }),
-    'uloz-pojisteni': () => ulozVuz('Pojistka upravena', o.id, (v) => { const p = v.pojisteni.find((x) => x.id === id); if (p) Object.assign(p, sesbirej(el.closest('[data-id]'))); }),
+    'uloz-pojisteni': () => ulozVuz('Pojistka upravena', o.id, (v) => { const p = v.pojisteni.find((x) => x.id === id); if (p) Object.assign(p, sesbirej(el.parentElement.closest('[data-id]'))); }),
     'smaz-pojisteni': () => ulozVuz('Pojistka smazána', o.id, (v) => { v.pojisteni = v.pojisteni.filter((x) => x.id !== id); }),
 
     'pridej-vybavu': () => ulozVuz('Věc do packu', o.id, (v) => { v.vybava = v.vybava || []; v.vybava.push({ id: uid('vb'), nazev: '', ks: 1, pozn: '' }); }),
-    'uloz-vybavu': () => ulozVuz('Pack upraven', o.id, (v) => { const b = v.vybava.find((x) => x.id === id); if (b) Object.assign(b, sesbirej(el.closest('[data-id]'))); }),
+    'uloz-vybavu': () => ulozVuz('Pack upraven', o.id, (v) => { const b = v.vybava.find((x) => x.id === id); if (b) Object.assign(b, sesbirej(el.parentElement.closest('[data-id]'))); }),
     'smaz-vybavu': () => ulozVuz('Věc z packu smazána', o.id, (v) => { v.vybava = v.vybava.filter((x) => x.id !== id); }),
 
     'pridej-servis': () => ulozVuz('Nový zápis servisky', o.id, (v) => { v.servis = v.servis || []; v.servis.push({ id: uid('se'), datum: dnesISO(), km: null, cena: null, popis: '', dokumenty: [] }); }),
-    'uloz-servis': () => ulozVuz('Serviska upravena', o.id, (v) => { const z = v.servis.find((x) => x.id === id); if (z) Object.assign(z, sesbirej(el.closest('[data-id]'))); }),
+    'uloz-servis': () => ulozVuz('Serviska upravena', o.id, (v) => { const z = v.servis.find((x) => x.id === id); if (z) Object.assign(z, sesbirej(el.parentElement.closest('[data-id]'))); }),
     'smaz-servis': async () => {
       if (!confirm('Smazat zápis ze servisky? Přílohy zůstanou v archivu.')) return;
       return ulozVuz('Zápis servisky smazán', o.id, (v) => { v.servis = v.servis.filter((x) => x.id !== id); });
     },
-    'otevri-dok': () => otevriDokument(o.id, id, +el.dataset.i),
+    'otevri-dok': () => otevriDokument(o.id, id, el.dataset.cesta),
     'smaz-dok': async () => {
       const z = (vuz(o.id)?.servis || []).find((s) => s.id === id);
-      const dok = z?.dokumenty?.[+el.dataset.i];
+      const cesta = el.dataset.cesta;
+      const dok = z?.dokumenty?.find((d) => d.cesta === cesta);
       if (!dok || !confirm(`Smazat přílohu ${dok.nazev}?`)) return;
-      try { await GH.smazSoubor(dok.cesta, 'Smazána příloha ' + dok.nazev); } catch {}
-      return ulozVuz('Příloha smazána', o.id, (v) => { const zz = v.servis.find((s) => s.id === id); if (zz) zz.dokumenty.splice(+el.dataset.i, 1); });
+      try { await GH.smazSoubor(cesta, 'Smazána příloha ' + dok.nazev); } catch {}
+      /* mazat podle cesty, ne indexu — index se při souběhu rozjede */
+      return ulozVuz('Příloha smazána', o.id, (v) => { const zz = v.servis.find((s) => s.id === id); if (zz && zz.dokumenty) zz.dokumenty = zz.dokumenty.filter((d) => d.cesta !== cesta); });
     },
 
     'pridej-tacho': async () => {
-      const km = prompt('Stav tachometru (km):');
-      if (km == null || km.trim() === '' || Number.isNaN(+km)) return;
+      let km = prompt('Stav tachometru (km):');
+      if (km == null) return;
+      km = km.replace(/\s/g, '').replace(',', '.');
+      if (km === '' || Number.isNaN(+km)) return hlaska('Stav tachometru musí být číslo, např. 64100.', 'chyba');
       return ulozVuz('Zápis tachometru', o.id, (v) => { v.tachometr = v.tachometr || []; v.tachometr.push({ id: uid('ta'), datum: dnesISO(), km: +km, kdo: JA.jmeno, pozn: 'ruční zápis' }); });
     },
     'smaz-tacho': () => ulozVuz('Zápis tachometru smazán', o.id, (v) => { v.tachometr = v.tachometr.filter((x) => x.id !== id); }),
 
     'pridej-milnik': () => ulozVuz('Nový milník', o.id, (v) => { v.milniky = v.milniky || []; v.milniky.push({ id: uid('mi'), nazev: '', typ: 'datum', hodnota: '', pozn: '' }); }),
-    'uloz-milnik': () => ulozVuz('Milník upraven', o.id, (v) => { const m = v.milniky.find((x) => x.id === id); if (m) { const h = sesbirej(el.closest('[data-id]')); if (h.typ === 'km') h.hodnota = h.hodnota === '' || h.hodnota == null ? null : +h.hodnota; Object.assign(m, h); } }),
+    'uloz-milnik': () => ulozVuz('Milník upraven', o.id, (v) => { const m = v.milniky.find((x) => x.id === id); if (m) { const h = sesbirej(el.parentElement.closest('[data-id]')); if (h.typ === 'km') h.hodnota = h.hodnota === '' || h.hodnota == null ? null : +h.hodnota; Object.assign(m, h); } }),
     'smaz-milnik': () => ulozVuz('Milník smazán', o.id, (v) => { v.milniky = v.milniky.filter((x) => x.id !== id); }),
 
     'novy-kontakt': () => otevriSuplik({ typ: 'kontakt', id: null }),
@@ -1802,24 +1857,32 @@ document.addEventListener('click', async (u) => {
       zavriSuplik();
     },
 
-    'novy-ukol': async () => {
-      const text = prompt('Co je potřeba udělat?');
-      if (!text) return;
-      return uloz('Nový úkol', SOUBORY.ukoly, (d) => {
-        d.polozky = d.polozky || [];
-        d.polozky.push({ id: uid('uk'), text, kategorie: 'jine', vuz: null, kdo: JA.jmeno, priorita: 'stredni', stav: 'otevreny', termin: '', vytvoril: JA.jmeno, vytvoreno: nyni() });
-      });
+    'novy-ukol': () => dialogUkol(null),
+    'uprav-ukol': () => dialogUkol(S.ukoly.find((x) => x.id === id)),
+    'uloz-ukol-dialog': async () => {
+      const hodnoty = sesbirej($('#rychly'));
+      if (!hodnoty.text) return hlaska('Napiš, co je potřeba udělat.', 'chyba');
+      if (id) {
+        await ulozPolozku('Úkol upraven', SOUBORY.ukoly, id, (u2) => Object.assign(u2, hodnoty));
+      } else {
+        await uloz('Nový úkol — ' + hodnoty.text.slice(0, 40), SOUBORY.ukoly, (d) => {
+          d.polozky = d.polozky || [];
+          d.polozky.push({ id: uid('uk'), ...hodnoty, stav: 'otevreny', vytvoril: JA.jmeno, vytvoreno: nyni() });
+        });
+      }
+      $('#rychly').close();
     },
     'ukol-prepni': () => ulozPolozku('Úkol přepnut', SOUBORY.ukoly, id, (p) => { p.stav = p.stav === 'hotovy' ? 'otevreny' : 'hotovy'; p.hotovoKdy = p.stav === 'hotovy' ? nyni() : null; }),
-    'smaz-ukol': () => ulozPolozku('Úkol smazán', SOUBORY.ukoly, id, () => {}) && uloz('Úkol smazán', SOUBORY.ukoly, (d) => { d.polozky = d.polozky.filter((x) => x.id !== id); }),
+    'smaz-ukol': () => uloz('Úkol smazán', SOUBORY.ukoly, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== id); }),
 
     'pridej-marketing': async () => {
-      await uloz('Nová útrata marketingu', SOUBORY.finance, (d) => {
+      const nid = uid('mk');
+      const ok = await uloz('Nová útrata marketingu', SOUBORY.finance, (d) => {
         d.marketing = d.marketing || [];
-        d.marketing.push({ id: uid('mk'), datum: dnesISO(), platforma: 'Meta Ads', kampan: '', castka: null, odkaz: '', imprese: null, kliky: null, poptavky: null, pozn: '' });
+        d.marketing.push({ id: nid, datum: dnesISO(), platforma: 'Meta Ads', kampan: '', castka: null, odkaz: '', imprese: null, kliky: null, poptavky: null, pozn: '' });
       });
-      const posledni = S.finance.marketing[S.finance.marketing.length - 1];
-      dialogMarketing(posledni);
+      if (!ok) return;
+      dialogMarketing(S.finance.marketing.find((m) => m.id === nid));
     },
     'uprav-marketing': () => dialogMarketing((S.finance.marketing || []).find((m) => m.id === id)),
     'smaz-marketing': () => uloz('Útrata smazána', SOUBORY.finance, (d) => { d.marketing = d.marketing.filter((m) => m.id !== id); }),
@@ -1875,10 +1938,17 @@ document.addEventListener('click', async (u) => {
     },
 
     'prepni-uzivatele': () => { localStorage.removeItem('poutnik.ja'); location.reload(); },
-    odhlasit: () => { localStorage.removeItem('poutnik.token'); localStorage.removeItem('poutnik.ja'); location.reload(); },
+    odhlasit: () => { sessionStorage.removeItem('poutnik.token'); localStorage.removeItem('poutnik.ja'); location.reload(); },
   };
 
-  if (akceMapa[akce]) { u.preventDefault(); await akceMapa[akce](); }
+  if (akceMapa[akce]) {
+    u.preventDefault();
+    if (el.dataset.bezi) return;                    /* dvojklik = dvojí zápis */
+    el.dataset.bezi = '1';
+    if (el instanceof HTMLButtonElement) el.disabled = true;
+    try { await akceMapa[akce](); }
+    finally { delete el.dataset.bezi; if (el instanceof HTMLButtonElement) el.disabled = false; }
+  }
 });
 
 /* Hlavička */
@@ -1911,6 +1981,14 @@ document.addEventListener('change', async (u) => {
   if (!el) return;
   if (el.dataset.akceZmena === 'fin-obdobi') { UI.finObdobi = el.value; localStorage.setItem('poutnik.finobdobi', el.value); return vykresli(); }
   if (el.dataset.akceZmena === 'ukol-filtr') { UI.ukolFiltr = el.value; return vykresli(); }
+  if (el.dataset.akceZmena === 'milnik-typ' && UI.otevreno?.typ === 'vuz') {
+    const rid = el.closest('[data-id]')?.dataset.id;
+    const novyTyp = el.value;
+    return ulozVuz('Milník přepnut', UI.otevreno.id, (v) => {
+      const m = (v.milniky || []).find((x) => x.id === rid);
+      if (m) { m.typ = novyTyp; m.hodnota = novyTyp === 'km' ? null : ''; }
+    });
+  }
   if (el.dataset.akceFile === 'nahraj-dok') {
     const soubory = [...el.files];
     el.value = '';
@@ -1954,6 +2032,26 @@ function dialogMarketing(m) {
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
       <button class="btn nic" data-akce="dialog-zavri">Zavřít</button>
       <button class="btn hlavni" data-akce="uloz-marketing-dialog" data-id="${m.id}">Uložit</button>
+    </div>`;
+  d.showModal();
+}
+
+function dialogUkol(u) {
+  const d = $('#rychly');
+  const n = u || {};
+  d.innerHTML = `
+    <h2 style="font-size:19px;margin-bottom:12px">${u ? 'Úprava úkolu' : 'Nový úkol'}</h2>
+    <div class="rada">${pole({ k: 'text', p: 'Co je potřeba udělat', t: 'textarea' }, n.text)}</div>
+    <div class="rada r2">
+      ${pole({ k: 'kategorie', p: 'Kategorie', t: 'select', moznosti: [{ v: 'auto', p: 'oprava auta' }, { v: 'web', p: 'web' }, { v: 'marketing', p: 'reklama' }, { v: 'jine', p: 'jiné' }] }, n.kategorie || 'jine')}
+      ${pole({ k: 'vuz', p: 'Vůz (když se týká auta)', t: 'select', moznosti: [{ v: '', p: '—' }, ...S.vozy.map((v) => ({ v: v.id, p: v.nazev }))] }, n.vuz || '')}
+      ${pole({ k: 'priorita', p: 'Priorita', t: 'select', moznosti: [{ v: 'vysoka', p: 'důležité' }, { v: 'stredni', p: 'normální' }, { v: 'nizka', p: 'až bude čas' }] }, n.priorita || 'stredni')}
+      ${pole({ k: 'kdo', p: 'Kdo to udělá', t: 'select', moznosti: [{ v: '', p: '—' }, ...(S.nastaveni.partneri || []).map((x) => ({ v: x, p: x }))] }, n.kdo || JA.jmeno)}
+      ${pole({ k: 'termin', p: 'Termín', t: 'datum' }, n.termin)}
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn nic" data-akce="dialog-zavri">Zavřít</button>
+      <button class="btn hlavni" data-akce="uloz-ukol-dialog" ${u ? `data-id="${u.id}"` : ''}>${u ? 'Uložit' : 'Přidat úkol'}</button>
     </div>`;
   d.showModal();
 }
@@ -2011,7 +2109,7 @@ async function prihlasSe(token) {
   } catch (e) {
     $('#brana-info').textContent = '';
     $('#brana-chyba').textContent = e.message;
-    localStorage.removeItem('poutnik.token');
+    sessionStorage.removeItem('poutnik.token');
     $('#brana-form').classList.remove('skryto');
     return;
   }
@@ -2035,7 +2133,7 @@ $('#brana-form').addEventListener('submit', async (u) => {
   $('#brana-info').textContent = '';
   if (!token) { $('#brana-chyba').textContent = 'Špatné heslo.'; return; }
   /* Token zůstává jen v tomhle prohlížeči, svázaný s otiskem klíče. */
-  localStorage.setItem('poutnik.token', JSON.stringify({ token, otisk: otiskKlicu() }));
+  sessionStorage.setItem('poutnik.token', JSON.stringify({ token, otisk: otiskKlicu() }));
   prihlasSe(token);
 });
 
@@ -2054,7 +2152,7 @@ $('#brana-form').addEventListener('submit', async (u) => {
       '<a href="?demo=1">Mezitím se podívej na demo s ukázkovými daty →</a>';
     return;
   }
-  const ulozeny = JSON.parse(localStorage.getItem('poutnik.token') || 'null');
+  const ulozeny = JSON.parse(sessionStorage.getItem('poutnik.token') || 'null');
   if (ulozeny && ulozeny.otisk === otiskKlicu()) {
     $('#brana-form').classList.add('skryto');
     prihlasSe(ulozeny.token);

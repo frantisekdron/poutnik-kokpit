@@ -27,7 +27,7 @@ try:
 except ImportError:
     sys.exit("Chybí knihovna cryptography. Nainstaluj ji:  pip3 install cryptography")
 
-ITERACE = 600_000
+ITERACE = 1_000_000
 KOREN = Path(__file__).resolve().parent
 CONFIG = KOREN / "config.js"
 ZKUSEBNI_SOUBOR = "data/.overeni-pristupu"
@@ -151,11 +151,17 @@ def main():
         return
 
     print("\n  Teď heslo, kterým bude kokpit zamčený (pro tebe i parťáka stejné).")
+    print("  Pozor: zašifrovaný klíč je veřejně stažitelný — heslo je jediná obrana.")
     while True:
         heslo = getpass.getpass("  Heslo: ")
         if len(heslo) < 10:
             print("     Aspoň 10 znaků, prosím.")
             continue
+        if any(z in heslo.lower() for z in ("poutnik", "frantisekdron", "kokpit", "password", "12345")):
+            print("     Heslo nesmí obsahovat název projektu ani laciné vzory.")
+            continue
+        if len(heslo) < 14:
+            print("     (Doporučení: 14+ znaků nebo fráze ze 4 slov je proti offline lámání výrazně bezpečnější.)")
         znovu = getpass.getpass("     Ještě jednou pro kontrolu: ")
         if heslo != znovu:
             print("     Hesla se neshodují, zkus to znovu.")
@@ -174,6 +180,8 @@ def main():
         encoding="utf-8",
     )
     print(f"  Hotovo, zapsáno do {CONFIG.name}.")
+    print("\n  DŮLEŽITÉ: pokud jsi měnil klíč, starý klíč tím NEZANIKL.")
+    print("  Smaž ho ručně: github.com/settings/personal-access-tokens")
 
     if input("\n  Nasadit rovnou na web? [a/n] ").strip().lower() in ("a", "ano", "y", ""):
         subprocess.run(["bash", str(KOREN / "nasadit.sh"), "Nový přístupový klíč"], check=False)

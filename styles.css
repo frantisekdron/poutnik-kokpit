@@ -205,8 +205,8 @@ label.pole b { display: block; margin-bottom: 4px; font-weight: 600; letter-spac
 
 .kal-nastroje { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .kal-mesic { font-family: var(--displej); font-size: 19px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; min-width: 150px; text-align: center; }
-.kal { border: 1px solid var(--linka); border-radius: var(--r); overflow: hidden; background: var(--panel); }
-.kal-mriz { display: grid; }
+.kal { border: 1px solid var(--linka); border-radius: var(--r); overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; background: var(--panel); }
+.kal-mriz { display: grid; min-width: 860px; }
 .kal-hlava, .kal-lajna { display: grid; grid-template-columns: 150px 1fr; border-top: 1px solid var(--linka); }
 .kal-hlava { border-top: 0; background: var(--panel2); }
 .kal-dny { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; }
@@ -257,6 +257,7 @@ table.tab { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .tab td.cislo, .tab th.cislo { text-align: right; font-family: var(--mono); white-space: nowrap; }
 .tab .radek-akce { opacity: 0; display: flex; gap: 2px; justify-content: flex-end; }
 .tab tr:hover .radek-akce { opacity: 1; }
+@media (hover: none), (pointer: coarse) { .tab .radek-akce { opacity: 1; } }
 .tab tfoot td { border-top: 2px solid var(--linka2); font-weight: 700; }
 .pretece { overflow-x: auto; }
 
