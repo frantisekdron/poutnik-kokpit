@@ -1,0 +1,9 @@
+{
+  "name": "Poutník kokpit",
+  "short_name": "Poutník",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#12160F",
+  "theme_color": "#12160F",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
