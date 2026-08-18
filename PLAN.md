@@ -7,12 +7,15 @@ o vozech, penězích a rezervacích, napojitelný na web poutnik.lovable.app (Su
 - **Appka:** statická SPA na GitHub Pages → `frantisekdron.github.io/poutnik-kokpit`
 - **Databáze:** privátní repo `frantisekdron/poutnik-data` (JSON), zápis přes GitHub
   Contents API — každá změna = commit (vidíme kdo/kdy, nic se neztratí)
-- **Přístup:** heslo → AES-GCM dešifruje jemný PAT (jen poutnik-data). Dva uživatelé
-  (Franta + parťák), každý zápis podepsaný.
-- **Web:** Lovable/Supabase — kokpit čte `bookings` (poptávky z webu) a hlídá,
-  že `vehicles` na webu odpovídá skutečné flotile (generuje prompt pro Lovable).
-- **Monitoring:** odhad km z rezervací kalibrovaný zápisy tachometru; připraveno
-  napojení Traccar (levné 4G GPS krabičky) → pak skutečná poloha + km živě.
+- **Přístup:** heslo → AES-GCM dešifruje jemný PAT (jen poutnik-data). Jedno heslo a jeden
+  klíč pro oba; jméno u zápisu se vybírá při přihlášení (evidence, ne bezpečnostní důkaz).
+- **Web:** Lovable/Supabase — kokpit sám hlídá nepřevzaté poptávky (`bookings`) a rozdíly
+  mezi flotilou a nabídkou na webu (`vehicles`); k nápravě generuje prompt pro Lovable.
+  ⚠️ Web čte veřejným anon klíčem: na Supabase je potřeba zakázat anonymní SELECT
+  nad `bookings` (nechat jen INSERT z formuláře), jinak jsou data zákazníků veřejná.
+- **Monitoring:** bez GPS = odhad km z rezervací kalibrovaný zápisy tachometru.
+  Po vyplnění Traccaru (levné 4G krabičky) kokpit sám stahuje polohu i stav km
+  a zapisuje je do tachometru (tlačítko „Načíst z GPS" + automaticky při synchronizaci).
 
 ## Sekce (7, žádné další)
 Přehled (kontrolky+odhad km+doporučení) · Vozy (vybavení, leasing, pojištění,

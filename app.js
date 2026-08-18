@@ -12,6 +12,9 @@ const $$ = (s, k = document) => [...k.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+/* Do href pustit jen http(s) — esc() schéma javascript: nezastaví. */
+const httpUrl = (u) => /^https?:\/\//i.test(String(u ?? '').trim()) ? String(u).trim() : '';
+
 const pauza = (ms) => new Promise((r) => setTimeout(r, ms));
 const nyni = () => new Date().toISOString();
 const uid = (p) => p + '-' + Math.random().toString(36).slice(2, 9);
@@ -231,6 +234,8 @@ const DEMO = new URLSearchParams(location.search).has('demo');
 
 function zapniDemo() {
   const D = structuredClone(window.DEMO_DATA);
+  /* Veřejné demo nesmí sahat na ostrou databázi webu. */
+  if (D['data/nastaveni.json']) D['data/nastaveni.json'].supabase = { url: '', anonKey: '' };
   GH.nacti = async (soubor) => ({ zmeneno: true, data: D[soubor], sha: 'demo' });
   GH.zmen = async (soubor, uprav) => {
     const kopie = structuredClone(D[soubor]);
@@ -281,7 +286,9 @@ function prevezmi(soubor, data) {
 
 async function nactiVse() {
   await Promise.all(Object.values(SOUBORY).map(async (soubor) => {
+    const pred = GH.zapisy;
     const v = await GH.nacti(soubor);
+    if (GH.zapisy !== pred) { delete GH.etag[soubor]; return; }   /* náš zápis byl novější */
     if (v.zmeneno) prevezmi(soubor, v.data);
   }));
 }
@@ -302,7 +309,19 @@ function spustSynchronizaci() {
         if (v.zmeneno) { prevezmi(soubor, v.data); neco = true; }
       }
       /* Do otevřeného šuplíku se pod rukama nesahá — překreslí se po zavření. */
+      await zkontrolujWeb();
+      if ((S.nastaveni.traccar || {}).url) await nactiZGps({ tise: true });
       if (neco) {
+        /* Parťák mě přejmenoval — nepodepisovat dál jménem, které neexistuje. */
+        if (JA.jmeno && !(S.nastaveni.partneri || []).includes(JA.jmeno)) {
+          localStorage.removeItem('poutnik.ja');
+          JA.jmeno = null;
+          zavriSuplik();
+          $('#app').classList.add('skryto');
+          $('#brana').classList.remove('skryto');
+          hlaska('Jména parťáků se změnila — vyber znovu, kdo jsi.', 'chyba');
+          return ukazKdoJsem();
+        }
         if (UI.otevreno) UI.prekreslitPoZavreni = true;
         else vykresli();
       }
@@ -332,6 +351,9 @@ async function uloz(zprava, soubor, uprav) {
     /* Po neúspěchu zahodit ETag, jinak by synchronizace dostala 304
        a appka by zůstala viset na starých datech. */
     delete GH.etag[soubor];
+    /* Retry mohl stáhnout parťákovu verzi — propsat ji, ať se šuplík
+       překreslí z čerstvých dat a další pokus projde. */
+    if (GH.mezipamet[soubor]) prevezmi(soubor, GH.mezipamet[soubor].data);
     hlaska(e.message || 'Uložení se nepovedlo.', 'chyba');
     return false;
   } finally {
@@ -341,8 +363,19 @@ async function uloz(zprava, soubor, uprav) {
 }
 
 /* Změna jednoho vozu / jedné položky podle ID — bezpečné i po sloučení s cizí verzí. */
-const ulozVuz = (zprava, id, fn) =>
-  uloz(zprava, SOUBORY.vozy, (d) => { const v = (d.vozy || []).find((x) => x.id === id); if (v) fn(v); });
+const ulozVuz = async (zprava, id, fn) => {
+  const o = UI.otevreno;
+  const hlida = o && o.typ === 'vuz' && o.id === id && o.otisk;
+  const ok = await uloz(zprava, SOUBORY.vozy, (d) => {
+    const v = (d.vozy || []).find((x) => x.id === id);
+    if (!v) return;
+    /* Formulář drží celý blok — bez kontroly verze bychom přepsali parťákovu změnu. */
+    if (hlida && JSON.stringify(v) !== o.otisk) throw new Error('Vůz mezitím upravil parťák — šuplík se obnovil, uprav čerstvou verzi.');
+    fn(v);
+  });
+  if (!ok && hlida) { o.otisk = null; kresliSuplik(); }
+  return ok;
+};
 const ulozPolozku = (zprava, soubor, id, fn) =>
   uloz(zprava, soubor, (d) => { const p = (d.polozky || []).find((x) => x.id === id); if (p) fn(p); });
 
@@ -385,17 +418,18 @@ function odhadKm(v) {
   const denniKm = kmNaDen(v);
   let km = +posl.km;
   let presne = true;
-  for (const r of rezervaceVozu(v.id)) {
+  /* Chronologicky — jinak by Math.max ze skutečného zápisu spolkl dřívější odhad. */
+  for (const r of rezervaceVozu(v.id).sort((a, b) => String(a.od || '').localeCompare(String(b.od || '')))) {
     if (r.stav !== 'vydano' && r.stav !== 'vraceno') continue;
-    /* Běžící výpůjčka přirůstá i po zápisu km z vydání. */
-    const zacatek = r.od > posl.datum ? r.od : (r.stav === 'vydano' ? posl.datum : null);
-    if (!zacatek) continue;                       // jízda už je v posledním zápisu
+    if (r.stav === 'vraceno' && r.do <= posl.datum) continue;   // jízda už je v zápisu
+    const zacatek = r.od > posl.datum ? r.od : posl.datum;
     const kmr = kmRez(r, v.id);
     if (kmr.pred != null && kmr.po != null) {
       km = Math.max(km, kmr.po);                  // skutečnost má přednost
     } else {
-      const konec = r.stav === 'vydano' ? (dnes < r.do ? dnes : r.do) : r.do;
-      if (konec > zacatek) {
+      /* Nevrácený vůz jede dál i po termínu. */
+      const konec = r.stav === 'vydano' ? dnes : r.do;
+      if (konec > zacatek || (konec === zacatek && r.od > posl.datum)) {
         km += denniKm * dniRez(zacatek, konec);
         presne = false;
       }
@@ -407,8 +441,12 @@ function odhadKm(v) {
 /* Vůz dnes: volný / na cestě / rezervace dnes začíná. */
 function stavDnes(v) {
   const dnes = dnesISO();
-  const bezici = rezervaceVozu(v.id).find((r) => r.stav === 'vydano' && r.od <= dnes && dnes <= r.do);
-  if (bezici) return { druh: 'vydano', text: 'na cestě do ' + denKratce(bezici.do), rez: bezici };
+  const bezici = rezervaceVozu(v.id).find((r) => r.stav === 'vydano' && r.od <= dnes);
+  if (bezici) return {
+    druh: 'vydano',
+    text: dnes <= bezici.do ? 'na cestě do ' + denKratce(bezici.do) : 'po termínu — měl vrátit ' + denKratce(bezici.do),
+    rez: bezici,
+  };
   const dnesni = rezervaceVozu(v.id).find((r) => (r.stav === 'potvrzeno' || r.stav === 'poptavka') && r.od <= dnes && dnes <= r.do);
   if (dnesni) return { druh: dnesni.stav, text: (dnesni.stav === 'potvrzeno' ? 'vydat — rezervace běží' : 'poptávka na dnešek'), rez: dnesni };
   const pristi = rezervaceVozu(v.id).filter((r) => r.stav !== 'vraceno' && r.od > dnes).sort((a, b) => a.od.localeCompare(b.od))[0];
@@ -451,10 +489,14 @@ function kontrolky() {
       else if (za != null && za <= 30) vysledek.push({ druh: 'varuje', vuz: v, text: `${p.druh} končí za ${za} dní` });
     }
     const l = v.leasing || {};
-    if (cislo(l.denSplatky) != null && cislo(l.mesicniSplatka) != null) {
-      const den = +dnes.slice(8, 10);
-      const za = (l.denSplatky - den + 31) % 31;
-      if (za <= 3) vysledek.push({ druh: 'info', vuz: v, text: `Splátka leasingu ${kc(l.mesicniSplatka)} ${za === 0 ? 'dnes' : 'za ' + za + ' dny'} (${l.spolecnost || '—'})` });
+    if (cislo(l.denSplatky) != null && cislo(l.mesicniSplatka) != null && !(l.konec && l.konec < dnes)) {
+      /* Skutečný kalendář — ne modulo 31, to v únoru i v 30denních měsících lže. */
+      const ds = cislo(l.denSplatky);
+      let rok = +dnes.slice(0, 4), mes = +dnes.slice(5, 7);
+      if (+dnes.slice(8, 10) > ds) { mes += 1; if (mes > 12) { mes = 1; rok += 1; } }
+      const posledniDen = new Date(rok, mes, 0).getDate();
+      const za = dniDo(`${rok}-${String(mes).padStart(2, '0')}-${String(Math.min(ds, posledniDen)).padStart(2, '0')}`);
+      if (za != null && za <= 3) vysledek.push({ druh: 'info', vuz: v, text: `Splátka leasingu ${kc(l.mesicniSplatka)} ${za === 0 ? 'dnes' : 'za ' + za + ' dny'} (${l.spolecnost || '—'})` });
     }
     if (!posledniTacho(v) && v.typ !== 'stan') vysledek.push({ druh: 'info', vuz: v, text: 'Chybí první zápis tachometru' });
   }
@@ -465,8 +507,13 @@ function kontrolky() {
       if (stari > 48) vysledek.push({ druh: 'varuje', rez: r, text: `Poptávka ${jmenoRez(r)} čeká ${Math.floor(stari / 24)} dní na odpověď` });
     }
     if (r.stav === 'potvrzeno' && r.od < dnes) vysledek.push({ druh: 'varuje', rez: r, text: `Rezervace ${jmenoRez(r)} měla začít ${denCesky(r.od)} — vydat vůz?` });
-    if (r.stav === 'vydano' && r.do < dnes) vysledek.push({ druh: 'varuje', rez: r, text: `${jmenoRez(r)} měl vrátit ${denCesky(r.do)} — vrátit a zapsat km` });
+    if (r.stav === 'vydano' && r.do < dnes) vysledek.push({ druh: 'varuje', rez: r, vuz: vuz((r.vozy || [])[0]), text: `${jmenoRez(r)} měl vrátit ${denCesky(r.do)} — vrátit a zapsat km` });
   }
+
+  if (WEB.neprevzato) vysledek.push({ druh: 'varuje', text: `${WEB.neprevzato} nových poptávek na webu čeká na převzetí — Kalendář → Poptávky z webu` });
+
+  /* Web nabízí něco, co v kokpitu není (nebo za jinou cenu). */
+  for (const rozdil of rozdilyWebu()) vysledek.push({ druh: 'info', text: rozdil });
 
   for (const k of konflikty()) {
     vysledek.push({ druh: 'hori', text: `KONFLIKT: ${vuz(k.vid)?.nazev || '?'} má překryv ${denKratce(k.a.od)}–${denKratce(k.a.do)} × ${denKratce(k.b.od)}–${denKratce(k.b.do)}` });
@@ -488,7 +535,10 @@ function konflikty() {
     const rez = rezervaceVozu(v.id).filter((r) => r.stav === 'potvrzeno' || r.stav === 'vydano');
     for (let i = 0; i < rez.length; i++) for (let j = i + 1; j < rez.length; j++) {
       const a = rez[i], b = rez[j];
-      if (a.od < b.do && b.od < a.do) zle.push({ vid: v.id, a, b });
+      /* Jednodenní rezervace (od==do) se bere jako jedna noc, jinak by se překryv neodhalil. */
+      const doA = a.do > a.od ? a.do : pridejDni(a.od, 1);
+      const doB = b.do > b.od ? b.do : pridejDni(b.od, 1);
+      if (a.od < doB && b.od < doA) zle.push({ vid: v.id, a, b });
     }
   }
   return zle;
@@ -518,25 +568,45 @@ function plVozu(v, rozsah) {
   const rez = rezervaceVozu(v.id).filter((r) => r.od >= rozsah.od && r.od <= rozsah.do);
   const jiste = rez.filter((r) => r.stav === 'vydano' || r.stav === 'vraceno');
   const nasmlouvane = rez.filter((r) => r.stav === 'potvrzeno');
-  /* Cena rezervace se stanem/vozem napůl nedělí — počítá se vozu, stan má svoje. */
-  const vynos = jiste.reduce((a, r) => a + (cislo(r.castka) || 0) / (r.vozy?.length || 1), 0);
-  const vynosNasml = nasmlouvane.reduce((a, r) => a + (cislo(r.castka) || 0) / (r.vozy?.length || 1), 0);
+  /* Podíl vozu na částce rezervace je vážený denní cenou — stan nebere půlku
+     ceny auta. Když ceny nejsou vyplněné, dělí se rovným dílem. */
+  const podil = (r) => {
+    const soucet = (r.vozy || []).reduce((a, id) => a + (cislo(vuz(id)?.cenaDen) || 0), 0);
+    if (soucet) return (cislo(v.cenaDen) || 0) / soucet;
+    return 1 / Math.max(1, (r.vozy || []).filter((id) => vuz(id)).length);
+  };
+  const vynos = jiste.reduce((a, r) => a + (cislo(r.castka) || 0) * podil(r), 0);
+  const vynosNasml = nasmlouvane.reduce((a, r) => a + (cislo(r.castka) || 0) * podil(r), 0);
 
-  const mesicu = (rozsah.dnu || dniRez(rozsah.od, rozsah.do)) / 30.44;
   const l = v.leasing || {};
-  const leasing = (cislo(l.mesicniSplatka) || 0) * mesicu;
-  const pojistky = (v.pojisteni || []).reduce((a, p) => a + (cislo(p.rocne) || 0), 0) / 12 * mesicu;
+  /* Náklad se počítá jen za dny, kdy smlouva v období skutečně běžela. */
+  const mesicuDo = (konec) => {
+    if (konec && konec < rozsah.od) return 0;
+    const doD = (konec && konec < rozsah.do) ? konec : rozsah.do;
+    return doD < rozsah.od ? 0 : dniRez(rozsah.od, doD) / 30.44;
+  };
+  const leasing = (cislo(l.mesicniSplatka) || 0) * mesicuDo(l.konec);
+  const pojistky = (v.pojisteni || []).reduce((a, p) => a + (cislo(p.rocne) || 0) / 12 * mesicuDo(p.platiDo), 0);
   const servis = (v.servis || []).filter((s) => s.datum >= rozsah.od && s.datum <= rozsah.do)
     .reduce((a, s) => a + (cislo(s.cena) || 0), 0);
 
+  /* Obsazenost počítá VŠECHNY rezervace protínající období (i ty, co začaly dřív),
+     na rozdíl od výnosu, který se váže na začátek rezervace. Překryvy se slučují. */
   const dnuCelkem = rozsah.dnu || dniRez(rozsah.od, rozsah.do);
-  let obsazeno = 0;
-  for (const r of rez.filter((x) => x.stav !== 'poptavka')) {
-    const od = r.od > rozsah.od ? r.od : rozsah.od;
-    const doD = r.do < rozsah.do ? r.do : rozsah.do;
-    if (od <= doD) obsazeno += dniRez(od, doD);
+  const useky = rezervaceVozu(v.id)
+    .filter((r) => r.stav !== 'poptavka' && r.od <= rozsah.do && r.do >= rozsah.od)
+    .map((r) => ({ od: r.od > rozsah.od ? r.od : rozsah.od, do: r.do < rozsah.do ? r.do : rozsah.do }))
+    .sort((a, b) => a.od.localeCompare(b.od));
+  let obsazeno = 0, hranice = null;
+  for (const u of useky) {
+    if (hranice && u.do <= hranice) continue;
+    obsazeno += dniRez(hranice && u.od < hranice ? hranice : u.od, u.do);
+    hranice = u.do;
   }
-  const fixniMesic = (cislo(l.mesicniSplatka) || 0) + (v.pojisteni || []).reduce((a, p) => a + (cislo(p.rocne) || 0), 0) / 12;
+  obsazeno = Math.min(obsazeno, dnuCelkem);
+  const dnes = dnesISO();
+  const fixniMesic = ((l.konec && l.konec < dnes) ? 0 : (cislo(l.mesicniSplatka) || 0))
+    + (v.pojisteni || []).filter((p) => !p.platiDo || p.platiDo >= dnes).reduce((a, p) => a + (cislo(p.rocne) || 0), 0) / 12;
 
   return {
     vynos, vynosNasml, leasing, pojistky, servis,
@@ -662,6 +732,7 @@ function kresliPrehled() {
     <div class="sekce-hl">
       <h2>Flotila dnes — ${denCesky(dnes)}</h2>
       <div class="mezera"></div>
+      ${(S.nastaveni.traccar || {}).url ? `<button class="btn mala" data-akce="nacti-gps"><svg class="icon"><use href="#i-poloha"/></svg>Načíst z GPS</button>` : ''}
       <span class="stitek">výnos 30 dní: <b style="color:var(--zelena)">&nbsp;${kc(vynos30)}</b></span>
       ${poptavky.length ? `<span class="stitek" style="color:var(--amber);border-color:var(--amber-tm)">${poptavky.length} nových poptávek</span>` : ''}
     </div>
@@ -682,6 +753,7 @@ function kresliPrehled() {
             ${v.typ === 'stan' ? `<span class="stitek">půjčuje se i samostatně</span>` : odoHtml(est.km, est.presne)}
             <span class="stitek">${kc(v.cenaDen)}/den</span>
           </div>
+          ${GPS.pozice[v.id] ? `<div class="vi-pozn"><svg class="icon" style="width:13px;height:13px"><use href="#i-poloha"/></svg><a href="https://www.openstreetmap.org/?mlat=${GPS.pozice[v.id].lat}&mlon=${GPS.pozice[v.id].lon}#map=13/${GPS.pozice[v.id].lat}/${GPS.pozice[v.id].lon}" target="_blank" rel="noopener">poloha z GPS</a> · ${GPS.pozice[v.id].rychlost} km/h · ${kdyKratce(GPS.pozice[v.id].kdy)}</div>` : ''}
           ${varov.length ? `<div class="vi-pozn ${varov[0].druh === 'hori' ? 'hori' : 'varuje'}"><svg class="icon" style="width:13px;height:13px"><use href="#i-zvon"/></svg>${esc(varov[0].text)}${varov.length > 1 ? ` (+${varov.length - 1})` : ''}</div>` : ''}
         </button>`;
       }).join('')}
@@ -798,6 +870,7 @@ const POD_VUZ = [
 function kresliSuplikVozu(o) {
   const v = vuz(o.id);
   if (!v) return zavriSuplik();
+  o.otisk = JSON.stringify(v);          /* verze, ze které uživatel vychází */
   o.pod = o.pod || 'info';
   const s = $('#suplik');
 
@@ -887,7 +960,7 @@ function podVybava(v) {
           <button class="btn mala nic pozor" data-akce="smaz-vybavu" data-id="${b.id}"><svg class="icon"><use href="#i-kos"/></svg></button>
         </div></td>
       </tr>`).join('')}
-    </tbody></table></div>` : '<div class="prazdno">Prázdný pack. Sepiš, co s autem vždycky jede — při vydání se to odškrtává.</div>'}
+    </tbody></table></div>` : '<div class="prazdno">Prázdný pack. Sepiš, co s autem vždycky jede — ať je při vydání co kontrolovat.</div>'}
   </div>`;
 }
 
@@ -1038,6 +1111,7 @@ function kresliKalendar() {
           ${(r.vozy || []).map((id) => { const v = vuz(id); return v ? `<span class="stitek plny" style="background:${v.barva}">${esc(v.nazev.split(' ')[0])}</span>` : ''; }).join('')}
           <button class="jmeno" style="text-align:left" data-otevri-rez="${r.id}">${esc(jmenoRez(r))}</button>
           <span class="stav-pill ${r.stav}">${r.stav}</span>
+          ${!(r.vozy || []).length ? '<span class="stitek" style="color:var(--cervena);border-color:var(--cervena)">bez vozu — přiřaď</span>' : ''}
           ${r.zdroj === 'web' ? '<span class="stitek">z webu</span>' : ''}
           <span class="kc">${kc(r.castka)}</span>
           ${r.stav === 'poptavka' ? `<button class="btn mala" data-akce="rez-potvrd" data-id="${r.id}">Potvrdit</button>` : ''}
@@ -1271,7 +1345,8 @@ function kresliMarketing() {
     <div class="sekce-hl">
       <h2>Marketing</h2>
       <div class="mezera"></div>
-      ${(S.finance.odkazy || []).map((o) => `<a class="btn mala" href="${esc(o.url)}" target="_blank" rel="noopener"><svg class="icon"><use href="#i-odkaz"/></svg>${esc(o.nazev)}</a>`).join('')}
+      ${(S.finance.odkazy || []).map((o) => { const u = httpUrl(o.url); return u ? `<a class="btn mala" href="${esc(u)}" target="_blank" rel="noopener"><svg class="icon"><use href="#i-odkaz"/></svg>${esc(o.nazev)}</a>` : ''; }).join('')}
+      <button class="btn mala nic" data-akce="uprav-odkazy" title="Upravit odkazy na statistiky"><svg class="icon"><use href="#i-tuzka"/></svg></button>
       <button class="btn hlavni" data-akce="pridej-marketing"><svg class="icon"><use href="#i-plus"/></svg>Zapsat útratu</button>
     </div>
 
@@ -1289,7 +1364,7 @@ function kresliMarketing() {
           <tr data-id="${m.id}">
             <td>${denKratce(m.datum)}</td>
             <td>${esc(m.platforma)}</td>
-            <td>${esc(m.kampan)}${m.odkaz ? ` <a href="${esc(m.odkaz)}" target="_blank" rel="noopener" title="statistiky kampaně"><svg class="icon" style="width:12px;height:12px"><use href="#i-odkaz"/></svg></a>` : ''}</td>
+            <td>${esc(m.kampan)}${httpUrl(m.odkaz) ? ` <a href="${esc(httpUrl(m.odkaz))}" target="_blank" rel="noopener" title="statistiky kampaně"><svg class="icon" style="width:12px;height:12px"><use href="#i-odkaz"/></svg></a>` : ''}</td>
             <td class="cislo">${kc(m.castka)}</td>
             <td class="cislo">${m.imprese ? fmtKc.format(m.imprese) : '—'}</td>
             <td class="cislo">${m.kliky ? fmtKc.format(m.kliky) : '—'}</td>
@@ -1345,6 +1420,7 @@ function kresliKontakty() {
 
 function kresliSuplikKontaktu(o) {
   const k = o.id ? kontakt(o.id) : null;
+  if (k && !o.otisk) o.otisk = JSON.stringify(k);
   const n = k || {};
   const rezky = k ? S.rezervace.filter((r) => r.kontakt === k.id).sort((a, b) => b.od.localeCompare(a.od)) : [];
   $('#suplik').innerHTML = `
@@ -1443,8 +1519,8 @@ function kresliSuplikNastaveni() {
       <p style="font-size:12.5px;color:var(--khaki);margin:0 0 10px">
         Nákup: 4× <b>SinoTrack ST-901L / ST-906L (4G)</b> ~700–900 Kč/ks + datová SIM (~30–50 Kč/měs).
         Krabičky nasměruj na server <b>Traccar</b> (zdarma, open-source) a sem vlož adresu + token.
-        Kokpit zatím umí spojení ověřit (tlačítko níže); živá poloha a km se napojí, až budou krabičky
-        v autech. Do té doby běží odhad km z rezervací.</p>
+        Jakmile to vyplníš, kokpit sám stahuje polohu i stav km (zapisuje je do tachometru) —
+        na Přehledu přibude tlačítko „Načíst z GPS" a u vozů odkaz na mapu. Bez GPS běží odhad z rezervací.</p>
       <div class="rada r2">
         ${pole({ k: 'url', p: 'Traccar server (URL)', t: 'text', ph: 'https://demo.traccar.org' }, t.url)}
         ${pole({ k: 'token', p: 'API token', t: 'text' }, t.token)}
@@ -1467,6 +1543,47 @@ function kresliSuplikNastaveni() {
       <button class="btn nic pozor" data-akce="odhlasit">Odhlásit z tohohle prohlížeče</button>
     </div>
   </div>`;
+}
+
+/* Živé GPS: Traccar drží u zařízení celkovou ujetou vzdálenost i poslední polohu. */
+const GPS = { pozice: {}, kdy: null };
+
+async function traccarVolej(cesta) {
+  const t = S.nastaveni.traccar || {};
+  if (!t.url || !t.token) throw new Error('V Nastavení chybí adresa Traccaru nebo token.');
+  const r = await fetch(String(t.url).replace(/\/$/, '') + cesta, { headers: { Authorization: 'Bearer ' + t.token } });
+  if (!r.ok) throw new Error('Traccar vrátil ' + r.status);
+  return r.json();
+}
+
+/* Stáhne polohy a u každého spárovaného vozu nabídne zápis km z tachometru GPS. */
+async function nactiZGps({ tise = false } = {}) {
+  const t = S.nastaveni.traccar || {};
+  if (!t.url || !t.token) { if (!tise) hlaska('Nejdřív vyplň Traccar v Nastavení.', 'chyba'); return; }
+  try {
+    const pozice = await traccarVolej('/api/positions');
+    GPS.pozice = {};
+    GPS.kdy = nyni();
+    let zapsano = 0;
+    for (const [vid, deviceId] of Object.entries(t.zarizeni || {})) {
+      const poz = pozice.find((x) => String(x.deviceId) === String(deviceId));
+      const v = vuz(vid);
+      if (!poz || !v) continue;
+      GPS.pozice[vid] = { lat: poz.latitude, lon: poz.longitude, rychlost: Math.round((poz.speed || 0) * 1.852), kdy: poz.deviceTime || poz.fixTime };
+      /* totalDistance je v metrech; zapisujeme jen skutečný posun, ať se kniha nezaplácá. */
+      const km = Math.round((poz.attributes?.totalDistance || 0) / 1000);
+      const posl = posledniTacho(v);
+      if (km > 0 && (!posl || km > (cislo(posl.km) || 0))) {
+        await ulozVuz(`GPS: ${v.nazev} ${fmtKc.format(km)} km`, vid, (x) => {
+          x.tachometr = x.tachometr || [];
+          x.tachometr.push({ id: uid('ta'), datum: dnesISO(), km, kdo: 'GPS', pozn: 'automaticky z Traccaru' });
+        });
+        zapsano++;
+      }
+    }
+    if (!tise) hlaska(zapsano ? `GPS: zapsáno ${zapsano}× km, poloha aktuální.` : 'GPS: poloha aktuální, km beze změny.');
+    vykresli();
+  } catch (e) { if (!tise) hlaska(e.message, 'chyba'); }
 }
 
 async function testTraccar() {
@@ -1521,6 +1638,7 @@ async function nactiPoptavkyZWebu() {
       supabaseFetch('bookings?select=*&order=created_at.desc&limit=50'),
       supabaseFetch('vehicles?select=*'),
     ]);
+    WEBVOZY.seznam = vehicles;
     otevriSuplik({ typ: 'web', bookings, vehicles, rezim: 'poptavky' });
   } catch (e) { hlaska(e.message, 'chyba'); }
 }
@@ -1529,8 +1647,23 @@ async function porovnejSWebem() {
   hlaska('Načítám vozy z webu…');
   try {
     const vehicles = await supabaseFetch('vehicles?select=*');
+    WEBVOZY.seznam = vehicles;
     otevriSuplik({ typ: 'web', vehicles, rezim: 'porovnani' });
   } catch (e) { hlaska(e.message, 'chyba'); }
+}
+
+/* Kolik poptávek z webu ještě není v kokpitu — hlídá se na pozadí. */
+const WEB = { neprevzato: 0, chyba: null };
+
+async function zkontrolujWeb() {
+  const sb = S.nastaveni.supabase || {};
+  if (!sb.url || !sb.anonKey) return;
+  try {
+    const bookings = await supabaseFetch('bookings?select=id&order=created_at.desc&limit=50');
+    const mame = new Set(S.rezervace.map((r) => r.webId).filter(Boolean));
+    WEB.neprevzato = bookings.filter((b) => !mame.has(String(b.id))).length;
+    WEB.chyba = null;
+  } catch (e) { WEB.chyba = e.message; }
 }
 
 /* Nabídka polí v cizí tabulce neznáme jistě — čteme obvyklá jména a zbytek ukážeme. */
@@ -1585,6 +1718,10 @@ function kresliSuplikWebu(o) {
     <button class="hl-btn" data-akce="zavri"><svg class="icon"><use href="#i-krizek"/></svg></button>
   </div>
   <div class="s-telo">
+    ${rozdilyWebu().length ? `<div class="blok" style="border-color:var(--amber-tm)">
+      <div class="blok-hl"><h4 style="color:var(--amber)">Rozdíly</h4></div>
+      ${rozdilyWebu().map((r) => `<div class="seznam-radek">${esc(r)}</div>`).join('')}
+    </div>` : '<div class="blok"><div class="seznam-radek">Web i kokpit nabízejí totéž.</div></div>'}
     <div class="blok">
       <div class="blok-hl"><h4>Vozy na webu (${webova.length})</h4></div>
       ${webova.map((v) => `<div class="seznam-radek"><span><b>${esc(v.name)}</b> · ${esc(v.category || '')} · ${kc(v.price_per_day)}/den</span>${v.is_active === false ? '<span class="stitek">skrytý</span>' : ''}</div>`).join('') || '<div class="prazdno">Web nevrátil žádné vozy.</div>'}
@@ -1598,6 +1735,27 @@ function kresliSuplikWebu(o) {
       <textarea id="lovable-prompt" style="min-height:220px;font:12px var(--mono)">${esc(prompt)}</textarea>
     </div>
   </div>`;
+}
+
+/* Porovnání flotily s tím, co nabízí web — pojmenuje konkrétní rozdíly. */
+const WEBVOZY = { seznam: null };
+
+function rozdilyWebu() {
+  if (!WEBVOZY.seznam) return [];
+  const rozdily = [];
+  const nase = S.vozy.filter((v) => v.aktivni !== false);
+  const sedi = (v, w) => String(w.name || '').toLowerCase().split(/\s+/)
+    .some((slovo) => slovo.length > 3 && v.nazev.toLowerCase().includes(slovo));
+  for (const v of nase) {
+    const w = WEBVOZY.seznam.find((x) => sedi(v, x));
+    if (!w) rozdily.push(`Web nenabízí ${v.nazev} — chybí v nabídce`);
+    else if (cislo(v.cenaDen) != null && cislo(w.price_per_day) != null && +w.price_per_day !== +v.cenaDen)
+      rozdily.push(`${v.nazev}: web má ${kc(w.price_per_day)}/den, kokpit ${kc(v.cenaDen)}/den`);
+  }
+  for (const w of WEBVOZY.seznam.filter((x) => x.is_active !== false)) {
+    if (!nase.some((v) => sedi(v, w))) rozdily.push(`Web nabízí „${w.name}", který v kokpitu není`);
+  }
+  return rozdily;
 }
 
 function lovablePrompt() {
@@ -1754,7 +1912,11 @@ document.addEventListener('click', async (u) => {
     'kal-dnes': () => { UI.kalMesic = dnesISO().slice(0, 7); vykresli(); },
 
     'nova-rez': () => otevriSuplik({ typ: 'rezervace', id: null, predvyplneno: { vozy: [], od: dnesISO(), do: pridejDni(dnesISO(), 3), stav: 'poptavka' } }),
-    'rez-potvrd': () => ulozPolozku('Rezervace potvrzena', SOUBORY.rezervace, id, (p) => { p.stav = 'potvrzeno'; }),
+    'rez-potvrd': () => {
+      const r = S.rezervace.find((x) => x.id === id);
+      if (!(r?.vozy || []).length) return hlaska('Rezervace nemá vůz — otevři ji a vyber, co pojede.', 'chyba');
+      return ulozPolozku('Rezervace potvrzena', SOUBORY.rezervace, id, (p) => { p.stav = 'potvrzeno'; });
+    },
     'rez-vydej': () => dialogKm(S.rezervace.find((r) => r.id === id), 'vydej'),
     'rez-vrat': () => dialogKm(S.rezervace.find((r) => r.id === id), 'vrat'),
     'rez-zrus': async () => {
@@ -1772,6 +1934,9 @@ document.addEventListener('click', async (u) => {
         const ok = await ulozPolozku('Úprava rezervace', SOUBORY.rezervace, id, (p) => {
           if (o.otisk && JSON.stringify(p) !== o.otisk) throw new Error('Rezervaci mezitím změnil parťák — formulář se obnovil, uprav čerstvou verzi.');
           Object.assign(p, hodnoty, { vozy: vozyVybrane });
+          /* Pole km ve formuláři patří prvnímu autu — propsat i tam, odkud se čte. */
+          const prvni = vozyVybrane.find((vid) => vuz(vid)?.typ !== 'stan');
+          if (prvni && p.kmVozy?.[prvni]) p.kmVozy[prvni] = { ...p.kmVozy[prvni], pred: cislo(hodnoty.kmPred), po: cislo(hodnoty.kmPo) };
         });
         if (!ok) { o.otisk = null; kresliSuplik(); return; }
       } else {
@@ -1792,7 +1957,11 @@ document.addEventListener('click', async (u) => {
       otevriSuplik({ typ: 'vuz', id: idN });
     },
     'smaz-vuz': async () => {
-      if (!o?.id || !confirm('Opravdu smazat celý vůz včetně servisky a vybavení? (Rezervace zůstanou.)')) return;
+      if (!o?.id) return;
+      const osirele = S.rezervace.filter((r) => r.stav !== 'zruseno' && (r.vozy || []).includes(o.id)
+        && !(r.vozy || []).some((x) => x !== o.id && vuz(x)));
+      if (osirele.length) return hlaska(`Nejde smazat: ${osirele.length} rezervací má tenhle vůz jako jediný. Nejdřív je přepiš na jiný vůz nebo zruš.`, 'chyba');
+      if (!confirm('Opravdu smazat celý vůz včetně servisky a vybavení? (Rezervace zůstanou.)')) return;
       await uloz('Smazán vůz', SOUBORY.vozy, (d) => { d.vozy = d.vozy.filter((v) => v.id !== o.id); });
       zavriSuplik();
     },
@@ -1852,7 +2021,13 @@ document.addEventListener('click', async (u) => {
       if (!hodnoty.jmeno) return hlaska('Jméno je potřeba.', 'chyba');
       hodnoty.stitky = String(hodnoty.stitky || '').split(',').map((x) => x.trim()).filter(Boolean);
       hodnoty.dokladOk = hodnoty.dokladOk === 'ano';
-      if (id) await ulozPolozku('Kontakt upraven', SOUBORY.kontakty, id, (p) => Object.assign(p, hodnoty));
+      if (id) {
+        const ok = await ulozPolozku('Kontakt upraven', SOUBORY.kontakty, id, (p) => {
+          if (o?.otisk && JSON.stringify(p) !== o.otisk) throw new Error('Kontakt mezitím upravil parťák — formulář se obnovil, uprav čerstvou verzi.');
+          Object.assign(p, hodnoty);
+        });
+        if (!ok) { if (o) o.otisk = null; kresliSuplik(); return; }
+      }
       else await uloz('Nový kontakt — ' + hodnoty.jmeno, SOUBORY.kontakty, (d) => { d.polozky = d.polozky || []; d.polozky.push({ id: uid('ko'), ...hodnoty, vytvoreno: nyni() }); });
       zavriSuplik();
     },
@@ -1872,7 +2047,11 @@ document.addEventListener('click', async (u) => {
       }
       $('#rychly').close();
     },
-    'ukol-prepni': () => ulozPolozku('Úkol přepnut', SOUBORY.ukoly, id, (p) => { p.stav = p.stav === 'hotovy' ? 'otevreny' : 'hotovy'; p.hotovoKdy = p.stav === 'hotovy' ? nyni() : null; }),
+    'ukol-prepni': () => {
+      /* Cíl se určí z toho, co uživatel vidí — relativní toggle by se při retry obrátil. */
+      const cil = S.ukoly.find((x) => x.id === id)?.stav === 'hotovy' ? 'otevreny' : 'hotovy';
+      return ulozPolozku('Úkol přepnut', SOUBORY.ukoly, id, (p) => { p.stav = cil; p.hotovoKdy = cil === 'hotovy' ? nyni() : null; });
+    },
     'smaz-ukol': () => uloz('Úkol smazán', SOUBORY.ukoly, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== id); }),
 
     'pridej-marketing': async () => {
@@ -1892,6 +2071,18 @@ document.addEventListener('click', async (u) => {
       $('#rychly').close();
     },
 
+    'uprav-odkazy': () => dialogOdkazy(),
+    'pridej-odkaz-radek': () => { $('#odkazy-radky').insertAdjacentHTML('beforeend', $('#rychly').dataset.radek); },
+    'smaz-odkaz-radek': () => { el.closest('.odkaz-radek')?.remove(); },
+    'uloz-odkazy-dialog': async () => {
+      const radky = $$('#odkazy-radky .odkaz-radek').map((r) => ({
+        nazev: r.querySelector('[data-k="nazev"]').value.trim(),
+        url: r.querySelector('[data-k="url"]').value.trim(),
+      })).filter((o) => o.nazev && httpUrl(o.url));
+      const ok = await uloz('Odkazy na statistiky upraveny', SOUBORY.finance, (d) => { d.odkazy = radky; });
+      if (ok) $('#rychly').close();
+    },
+
     'pridej-investici': () => dialogInvestice(),
     'uloz-investici-dialog': async () => {
       const hodnoty = sesbirej($('#rychly'));
@@ -1907,6 +2098,7 @@ document.addEventListener('click', async (u) => {
       return uloz('Vklad smazán', SOUBORY.finance, (d) => { d.investice = d.investice.filter((i) => i.id !== id); });
     },
 
+    'nacti-gps': () => nactiZGps(),
     'nacti-web': () => nactiPoptavkyZWebu(),
     'porovnat-web': () => porovnejSWebem(),
     'import-booking': () => importujBooking(o, +el.dataset.i),
@@ -1953,8 +2145,16 @@ document.addEventListener('click', async (u) => {
 
 /* Hlavička */
 $('#btn-obnovit').addEventListener('click', async () => {
+  if (UI.ukladam) return;                       /* zápis v letu — čtení by vrátilo starší verzi */
   $('#btn-obnovit').classList.add('tocise');
-  try { await nactiVse(); vykresli(); hlaska('Data obnovena.'); }
+  const pred = GH.zapisy;
+  try {
+    await nactiVse();
+    if (GH.zapisy !== pred) {                   /* mezitím doběhl náš zápis — tik zahodit */
+      for (const soubor of Object.values(SOUBORY)) delete GH.etag[soubor];
+    } else if (UI.otevreno) { UI.prekreslitPoZavreni = true; hlaska('Data obnovena.'); }
+    else { vykresli(); hlaska('Data obnovena.'); }
+  }
   catch (e) { hlaska(e.message, 'chyba'); }
   finally { if (!UI.ukladam) $('#btn-obnovit').classList.remove('tocise'); }
 });
@@ -2036,6 +2236,28 @@ function dialogMarketing(m) {
   d.showModal();
 }
 
+function dialogOdkazy() {
+  const d = $('#rychly');
+  const radek = (o = { nazev: '', url: '' }) => `
+    <div class="rada r2 odkaz-radek" style="align-items:end">
+      ${pole({ k: 'nazev', p: 'Název', t: 'text', ph: 'Google Ads' }, o.nazev)}
+      <div style="display:flex;gap:6px;align-items:end">
+        ${pole({ k: 'url', p: 'Odkaz', t: 'text', ph: 'https://…' }, o.url)}
+        <button class="btn mala nic pozor" data-akce="smaz-odkaz-radek"><svg class="icon"><use href="#i-kos"/></svg></button>
+      </div>
+    </div>`;
+  d.innerHTML = `
+    <h2 style="font-size:19px;margin-bottom:12px">Odkazy na statistiky</h2>
+    <div id="odkazy-radky">${(S.finance.odkazy || []).map(radek).join('') || radek()}</div>
+    <button class="btn mala" data-akce="pridej-odkaz-radek"><svg class="icon"><use href="#i-plus"/></svg>Přidat odkaz</button>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn nic" data-akce="dialog-zavri">Zavřít</button>
+      <button class="btn hlavni" data-akce="uloz-odkazy-dialog">Uložit</button>
+    </div>`;
+  d.dataset.radek = radek();
+  d.showModal();
+}
+
 function dialogUkol(u) {
   const d = $('#rychly');
   const n = u || {};
@@ -2098,18 +2320,31 @@ function spustApp() {
   $('#app').classList.remove('skryto');
   vykresli();
   spustSynchronizaci();
+  /* Hned po startu se podívat na web i na GPS, ať kontrolky mluví pravdu. */
+  if (!DEMO) {
+    zkontrolujWeb().then(vykresli).catch(() => {});
+    if ((S.nastaveni.traccar || {}).url) nactiZGps({ tise: true });
+  }
 }
 
-async function prihlasSe(token) {
+async function prihlasSe(token, heslo) {
   GH.token = token;
   $('#brana-chyba').textContent = '';
   $('#brana-info').textContent = 'Načítám data…';
   try {
     await nactiVse();
   } catch (e) {
+    /* Klíč vyměněný pod stejným heslem: stáhni čerstvý config a zkus znovu. */
+    if (e.stav === 401 && heslo && await nactiCerstvyConfig()) {
+      const novy = await odemkni(heslo);
+      if (novy && novy !== token) {
+        sessionStorage.setItem('poutnik.token', JSON.stringify({ token: novy, otisk: otiskKlicu() }));
+        return prihlasSe(novy, heslo);
+      }
+    }
     $('#brana-info').textContent = '';
     $('#brana-chyba').textContent = e.message;
-    sessionStorage.removeItem('poutnik.token');
+    if (e.stav === 401) sessionStorage.removeItem('poutnik.token');   /* výpadek sítě přihlášení neruší */
     $('#brana-form').classList.remove('skryto');
     return;
   }
@@ -2147,7 +2382,7 @@ $('#brana-form').addEventListener('submit', async (u) => {
   if (!token) { $('#brana-chyba').textContent = 'Špatné heslo.'; return; }
   /* Token zůstává jen v tomhle prohlížeči, svázaný s otiskem klíče. */
   sessionStorage.setItem('poutnik.token', JSON.stringify({ token, otisk: otiskKlicu() }));
-  prihlasSe(token);
+  prihlasSe(token, heslo);
 });
 
 (async function start() {
