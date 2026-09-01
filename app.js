@@ -272,6 +272,20 @@ const UI = {
 };
 
 const vuz = (id) => S.vozy.find((v) => v.id === id);
+
+/* Vozy i příslušenství žijí v jednom seznamu — obojí se půjčuje, obojí má
+   svoji cenu a jde do kalendáře i do financí. Liší se jen tím, co se u nich
+   eviduje. Starší data bez `druh` poznáme podle typu „stan". */
+const jePris = (v) => !!v && (v.druh === 'prislusenstvi' || (!v.druh && v.typ === 'stan'));
+const autaSeznam = () => S.vozy.filter((v) => !jePris(v));
+const prisSeznam = () => S.vozy.filter(jePris);
+
+const KATEGORIE_PRIS = [
+  { v: 'spani', p: 'Spaní' }, { v: 'kola', p: 'Kola' }, { v: 'voda', p: 'Voda' },
+  { v: 'nosic', p: 'Nosiče a boxy' }, { v: 'mobilita', p: 'Mobilita' }, { v: 'jine', p: 'Ostatní' },
+];
+const kategoriePris = (k) => (KATEGORIE_PRIS.find((x) => x.v === k) || { p: 'Ostatní' }).p;
+const kusu = (v) => Math.max(1, cislo(v?.ks) || 1);
 const kontakt = (id) => S.kontakty.find((k) => k.id === id);
 const rezervaceVozu = (vid) => S.rezervace.filter((r) => (r.vozy || []).includes(vid) && r.stav !== 'zruseno');
 
@@ -498,7 +512,7 @@ function kontrolky() {
       const za = dniDo(`${rok}-${String(mes).padStart(2, '0')}-${String(Math.min(ds, posledniDen)).padStart(2, '0')}`);
       if (za != null && za <= 3) vysledek.push({ druh: 'info', vuz: v, text: `Splátka leasingu ${kc(l.mesicniSplatka)} ${za === 0 ? 'dnes' : 'za ' + za + ' dny'} (${l.spolecnost || '—'})` });
     }
-    if (!posledniTacho(v) && v.typ !== 'stan') vysledek.push({ druh: 'info', vuz: v, text: 'Chybí první zápis tachometru' });
+    if (!posledniTacho(v) && !jePris(v)) vysledek.push({ druh: 'info', vuz: v, text: 'Chybí první zápis tachometru' });
   }
 
   for (const r of S.rezervace) {
@@ -533,12 +547,19 @@ function konflikty() {
   const zle = [];
   for (const v of S.vozy) {
     const rez = rezervaceVozu(v.id).filter((r) => r.stav === 'potvrzeno' || r.stav === 'vydano');
+    /* Jednodenní rezervace (od==do) se bere jako jedna noc, jinak by se překryv neodhalil. */
+    const konec = (r) => (r.do > r.od ? r.do : pridejDni(r.od, 1));
+    const naSklade = kusu(v);
     for (let i = 0; i < rez.length; i++) for (let j = i + 1; j < rez.length; j++) {
       const a = rez[i], b = rez[j];
-      /* Jednodenní rezervace (od==do) se bere jako jedna noc, jinak by se překryv neodhalil. */
-      const doA = a.do > a.od ? a.do : pridejDni(a.od, 1);
-      const doB = b.do > b.od ? b.do : pridejDni(b.od, 1);
-      if (a.od < doB && b.od < doA) zle.push({ vid: v.id, a, b });
+      if (!(a.od < konec(b) && b.od < konec(a))) continue;
+      /* Máme-li víc kusů, kolize je až když je jich v jeden den víc než kusů. */
+      if (naSklade > 1) {
+        const zacatek = a.od > b.od ? a.od : b.od;
+        const soubezne = rez.filter((r) => r.od <= zacatek && konec(r) > zacatek).length;
+        if (soubezne <= naSklade) continue;
+      }
+      zle.push({ vid: v.id, a, b });
     }
   }
   return zle;
@@ -643,16 +664,20 @@ function doporuceni() {
       const skutecnychDnu = pl.obsazeno / 3;   // za měsíc průměrně
       if (skutecnychDnu < pl.breakEvenDnu) rady.push({ vuz: v, text: `pod break-even: fixní náklady ${kc(pl.fixniMesic)}/měs = ${Math.ceil(pl.breakEvenDnu)} dní pronájmu, reálně jede ${Math.round(skutecnychDnu)} dní/měs` });
     }
+    if (jePris(v)) continue;
     const rezBez = rezervaceVozu(v.id).filter((r) => { const k = kmRez(r, v.id); return r.stav === 'vraceno' && (k.pred == null || k.po == null); });
     if (rezBez.length) rady.push({ vuz: v, text: `${rezBez.length}× vráceno bez zapsaných km — odhad kilometrů se nemá z čeho učit` });
   }
 
-  const stan = S.vozy.find((v) => v.typ === 'stan');
-  if (stan) {
-    const sAuty = S.rezervace.filter((r) => r.stav !== 'zruseno' && (r.vozy || []).some((id) => (stan.naVozy || []).includes(id)));
-    const seStanem = sAuty.filter((r) => (r.vozy || []).includes(stan.id));
-    if (sAuty.length >= 3 && seStanem.length / sAuty.length < 0.3)
-      rady.push({ vuz: stan, text: `stan jel jen s ${seStanem.length} z ${sAuty.length} kompatibilních rezervací — nabízej ho aktivně při potvrzení (${kc(stan.cenaDen)}/den navíc)` });
+  /* Příslušenství vázané na konkrétní vozy — jak často se ho daří přiobjednat. */
+  for (const doplnek of prisSeznam().filter((x) => x.aktivni !== false && (x.naVozy || []).length)) {
+    const sAuty = S.rezervace.filter((r) => r.stav !== 'zruseno' && (r.vozy || []).some((id) => (doplnek.naVozy || []).includes(id)));
+    const sDoplnkem = sAuty.filter((r) => (r.vozy || []).includes(doplnek.id));
+    if (sAuty.length >= 3 && sDoplnkem.length / sAuty.length < 0.3)
+      rady.push({ vuz: doplnek, text: `jelo jen s ${sDoplnkem.length} z ${sAuty.length} možných rezervací — nabízej při potvrzení${cislo(doplnek.cenaDen) ? ` (${kc(doplnek.cenaDen)}/den navíc)` : ''}` });
+  }
+  for (const doplnek of prisSeznam().filter((x) => x.aktivni !== false && x.cenaDen == null)) {
+    rady.push({ vuz: doplnek, text: 'nemá cenu za den — dokud ji nedoplníš, nepočítá se do výdělku' });
   }
 
   const utrata30 = marketingV({ od: pridejDni(dnesISO(), -30), do: dnesISO() });
@@ -670,6 +695,7 @@ function doporuceni() {
 const ZALOZKY = [
   { id: 'prehled',   nazev: 'Přehled',   ikona: 'i-poloha' },
   { id: 'vozy',      nazev: 'Vozy',      ikona: 'i-auto' },
+  { id: 'prislusenstvi', nazev: 'Příslušenství', ikona: 'i-stan' },
   { id: 'kalendar',  nazev: 'Kalendář',  ikona: 'i-kalendar' },
   { id: 'finance',   nazev: 'Finance',   ikona: 'i-penize' },
   { id: 'marketing', nazev: 'Marketing', ikona: 'i-megafon' },
@@ -699,7 +725,7 @@ function vykresli() {
   $('#ja-jmeno').textContent = JA.jmeno || '';
 
   const kresli = {
-    prehled: kresliPrehled, vozy: kresliVozy, kalendar: kresliKalendar,
+    prehled: kresliPrehled, vozy: kresliVozy, prislusenstvi: kresliPrislusenstvi, kalendar: kresliKalendar,
     finance: kresliFinance, marketing: kresliMarketing, kontakty: kresliKontakty, ukoly: kresliUkoly,
   }[UI.zalozka] || kresliPrehled;
   $('#plocha').innerHTML = kresli();
@@ -738,7 +764,7 @@ function kresliPrehled() {
     </div>
 
     <div class="flotila">
-      ${S.vozy.filter((v) => v.aktivni !== false).map((v) => {
+      ${autaSeznam().filter((v) => v.aktivni !== false).map((v) => {
         const st = stavDnes(v);
         const est = odhadKm(v);
         const varov = vsechny.filter((k) => k.vuz?.id === v.id && k.druh !== 'info');
@@ -750,7 +776,7 @@ function kresliPrehled() {
             <span class="vi-stav">${esc(st.text)}</span>
           </div>
           <div class="vi-telo">
-            ${v.typ === 'stan' ? `<span class="stitek">půjčuje se i samostatně</span>` : odoHtml(est.km, est.presne)}
+            ${odoHtml(est.km, est.presne)}
             <span class="stitek">${kc(v.cenaDen)}/den</span>
           </div>
           ${GPS.pozice[v.id] ? `<div class="vi-pozn"><svg class="icon" style="width:13px;height:13px"><use href="#i-poloha"/></svg><a href="https://www.openstreetmap.org/?mlat=${GPS.pozice[v.id].lat}&mlon=${GPS.pozice[v.id].lon}#map=13/${GPS.pozice[v.id].lat}/${GPS.pozice[v.id].lon}" target="_blank" rel="noopener">poloha z GPS</a> · ${GPS.pozice[v.id].rychlost} km/h · ${kdyKratce(GPS.pozice[v.id].kdy)}</div>` : ''}
@@ -758,6 +784,19 @@ function kresliPrehled() {
         </button>`;
       }).join('')}
     </div>
+
+    ${(() => {
+      const venku = prisSeznam().filter((x) => rezervaceVozu(x.id).some((r) => r.stav === 'vydano' && r.od <= dnes));
+      const doma = prisSeznam().filter((x) => x.aktivni !== false && !venku.includes(x));
+      if (!prisSeznam().length) return '';
+      return `<div class="karta" style="margin-top:12px">
+        <h3>Příslušenství</h3>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">
+          ${venku.map((x) => `<button class="stitek plny" style="background:${x.barva}" data-otevri-vuz="${x.id}">${esc(x.nazev)} — půjčeno</button>`).join('')}
+          ${doma.map((x) => `<button class="stitek" data-otevri-vuz="${x.id}">${esc(x.nazev)}${kusu(x) > 1 ? ` ×${kusu(x)}` : ''}</button>`).join('')}
+        </div>
+      </div>`;
+    })()}
 
     <div class="prehled-mrizka">
       <div class="karta">
@@ -788,25 +827,25 @@ function kresliVozy() {
   return `
   <section class="sekce">
     <div class="sekce-hl">
-      <h2>Vozy a vybavení</h2>
+      <h2>Vozy</h2>
       <div class="mezera"></div>
       <button class="btn" data-akce="porovnat-web"><svg class="icon"><use href="#i-web"/></svg>Porovnat s webem</button>
       <button class="btn hlavni" data-akce="novy-vuz"><svg class="icon"><use href="#i-plus"/></svg>Přidat vůz</button>
     </div>
     <div class="vozy-mrizka">
-      ${S.vozy.map((v) => {
+      ${autaSeznam().map((v) => {
         const est = odhadKm(v);
         const l = v.leasing || {};
         return `
         <button class="vuz-karta" style="--vb:${v.barva}" data-otevri-vuz="${v.id}">
           <h3>${esc(v.nazev)} ${v.aktivni === false ? '<span class="stitek">vyřazen</span>' : ''}</h3>
           <div class="vk-fakta">
-            ${v.spz ? `<span>SPZ <b>${esc(v.spz)}</b></span>` : (v.typ === 'stan' ? '' : '<span style="color:var(--amber)">doplň SPZ</span>')}
+            ${v.spz ? `<span>SPZ <b>${esc(v.spz)}</b></span>` : '<span style="color:var(--amber)">doplň SPZ</span>'}
             ${v.rok ? `<span>rok <b>${v.rok}</b></span>` : ''}
             <span>cena <b>${kc(v.cenaDen)}/den</b></span>
             <span>kauce <b>${kc(v.kauce)}</b></span>
-            ${v.typ !== 'stan' ? `<span>tacho <b>${est.km == null ? '—' : fmtKc.format(est.km) + (est.presne ? '' : ' ~') + ' km'}</b></span>` : ''}
-            ${cislo(l.zbyva) != null ? `<span>zbývá splatit <b>${kc(l.zbyva)}</b></span>` : (v.typ === 'stan' ? '' : '<span style="color:var(--amber)">doplň leasing</span>')}
+            <span>tacho <b>${est.km == null ? '—' : fmtKc.format(est.km) + (est.presne ? '' : ' ~') + ' km'}</b></span>
+            ${cislo(l.zbyva) != null ? `<span>zbývá splatit <b>${kc(l.zbyva)}</b></span>` : '<span style="color:var(--amber)">doplň leasing</span>'}
             <span>vybavení <b>${(v.vybava || []).length} ks</b></span>
             <span>serviska <b>${(v.servis || []).length} zápisů</b></span>
           </div>
@@ -814,6 +853,79 @@ function kresliVozy() {
       }).join('')}
     </div>
   </section>`;
+}
+
+/* ---------------------------------------------------------- PŘÍSLUŠENSTVÍ */
+
+function kresliPrislusenstvi() {
+  const vse = prisSeznam();
+  const podleKategorii = KATEGORIE_PRIS
+    .map((k) => ({ k, kusy: vse.filter((v) => (v.kategorie || 'jine') === k.v) }))
+    .filter((x) => x.kusy.length);
+  const dnes = dnesISO();
+
+  return `
+  <section class="sekce">
+    <div class="sekce-hl">
+      <h2>Příslušenství — půjčuje se zvlášť</h2>
+      <div class="mezera"></div>
+      <button class="btn hlavni" data-akce="nove-prislusenstvi"><svg class="icon"><use href="#i-plus"/></svg>Přidat příslušenství</button>
+    </div>
+
+    ${podleKategorii.map(({ k, kusy }) => `
+      <h3 style="font:600 11.5px var(--mono);letter-spacing:.08em;color:var(--khaki-tm);margin:14px 2px 8px">${esc(k.p.toUpperCase())}</h3>
+      <div class="vozy-mrizka">
+        ${kusy.map((v) => {
+          const pujceno = rezervaceVozu(v.id).filter((r) => r.stav === 'vydano' && r.od <= dnes && dnes >= r.od).length;
+          return `
+          <button class="vuz-karta" style="--vb:${v.barva}" data-otevri-vuz="${v.id}">
+            <h3>${esc(v.nazev)} ${v.aktivni === false ? '<span class="stitek">vyřazeno</span>' : ''}</h3>
+            <div class="vk-fakta">
+              <span>cena <b>${v.cenaDen == null ? '<span style="color:var(--amber)">doplň</span>' : kc(v.cenaDen) + '/den'}</b></span>
+              ${cislo(v.kauce) != null ? `<span>kauce <b>${kc(v.kauce)}</b></span>` : ''}
+              <span>kusů <b>${kusu(v)}</b></span>
+              ${pujceno ? `<span style="color:var(--amber)">půjčeno <b>${pujceno}</b></span>` : '<span style="color:var(--zelena)">doma</span>'}
+              ${(v.naVozy || []).length ? `<span>pasuje na <b>${(v.naVozy || []).map((id) => esc(vuz(id)?.nazev.split(' ')[0] || '?')).join(', ')}</b></span>` : ''}
+              ${(v.servis || []).length ? `<span>opravy <b>${v.servis.length}</b></span>` : ''}
+            </div>
+          </button>`;
+        }).join('')}
+      </div>`).join('') || '<div class="prazdno">Zatím žádné příslušenství.</div>'}
+
+    ${kresliBasicVybaveni()}
+  </section>`;
+}
+
+/* Basic vybavení — sdílený standard, který jede s vozem vždy. */
+function kresliBasicVybaveni() {
+  const b = S.nastaveni.basicVybaveni || { spolecne: [], obytnak: [] };
+  const seznam = (klic, polozky, popis) => `
+    <div class="blok" style="background:var(--panel2)">
+      <div class="blok-hl">
+        <h4>${klic === 'spolecne' ? 'Ke každému vozu' : 'Obytňák — navíc ve standardu'}</h4>
+        <div class="mezera"></div>
+        <button class="btn mala" data-akce="pridej-basic" data-klic="${klic}"><svg class="icon"><use href="#i-plus"/></svg>Přidat</button>
+      </div>
+      <p style="font-size:12px;color:var(--khaki);margin:0 0 10px">${popis}</p>
+      ${(polozky || []).map((x) => `
+        <div class="rada r2" data-basic-id="${x.id}" style="align-items:end;margin-bottom:8px">
+          ${pole({ k: 'nazev', p: 'Věc', t: 'text' }, x.nazev)}
+          <div style="display:flex;gap:6px;align-items:end">
+            ${pole({ k: 'ks', p: 'Ks', t: 'cislo' }, x.ks)}
+            <button class="btn mala hlavni" data-akce="uloz-basic" data-klic="${klic}" data-id="${x.id}">Uložit</button>
+            <button class="btn mala nic pozor" data-akce="smaz-basic" data-klic="${klic}" data-id="${x.id}"><svg class="icon"><use href="#i-kos"/></svg></button>
+          </div>
+        </div>`).join('') || '<div class="prazdno">Zatím prázdné.</div>'}
+    </div>`;
+
+  return `
+  <div class="karta" style="margin-top:22px">
+    <h3>Basic vybavení — jede s každou zápůjčkou</h3>
+    <div class="prehled-mrizka" style="margin-top:0">
+      ${seznam('spolecne', b.spolecne, 'Přidává se ke každému vozu na přání zákazníka.')}
+      ${seznam('obytnak', b.obytnak, 'Platí navíc pro obytný vůz — předává se vždy v tomhle stavu.')}
+    </div>
+  </div>`;
 }
 
 /* ---------------------------------------------------------- šuplík: obecné */
@@ -867,24 +979,29 @@ const POD_VUZ = [
   { id: 'servis', p: 'Serviska' }, { id: 'tacho', p: 'Tachometr' }, { id: 'milniky', p: 'Milníky' },
 ];
 
+const POD_PRIS = [{ id: 'info', p: 'Věc & cena' }, { id: 'servis', p: 'Opravy' }];
+
 function kresliSuplikVozu(o) {
   const v = vuz(o.id);
   if (!v) return zavriSuplik();
   o.otisk = JSON.stringify(v);          /* verze, ze které uživatel vychází */
-  o.pod = o.pod || 'info';
+  const pris = jePris(v);
+  const zalozky = pris ? POD_PRIS : POD_VUZ;
+  if (!zalozky.some((z) => z.id === o.pod)) o.pod = 'info';
   const s = $('#suplik');
 
   s.innerHTML = `
   <div class="s-hl" style="border-left:5px solid ${v.barva}">
     <h2>${esc(v.nazev)}</h2>
     <div style="flex:1"></div>
-    <button class="btn nic mala" data-akce="smaz-vuz" title="Smazat vůz"><svg class="icon"><use href="#i-kos"/></svg></button>
+    <button class="btn nic mala" data-akce="smaz-vuz" title="${pris ? 'Smazat příslušenství' : 'Smazat vůz'}"><svg class="icon"><use href="#i-kos"/></svg></button>
     <button class="hl-btn" data-akce="zavri"><svg class="icon"><use href="#i-krizek"/></svg></button>
   </div>
   <div class="s-telo">
-    <div class="pod-zalozky">${POD_VUZ.map((p) => `<button class="pod-zalozka" data-pod="${p.id}" aria-selected="${String(p.id === o.pod)}">${p.p}</button>`).join('')}</div>
+    <div class="pod-zalozky">${zalozky.map((p) => `<button class="pod-zalozka" data-pod="${p.id}" aria-selected="${String(p.id === o.pod)}">${p.p}</button>`).join('')}</div>
     <div id="pod-obsah">${
-      o.pod === 'info' ? podInfoVozu(v)
+      pris ? (o.pod === 'servis' ? podServis(v) : podInfoPris(v))
+      : o.pod === 'info' ? podInfoVozu(v)
       : o.pod === 'vybava' ? podVybava(v)
       : o.pod === 'servis' ? podServis(v)
       : o.pod === 'tacho' ? podTacho(v)
@@ -945,8 +1062,55 @@ function podInfoVozu(v) {
   </div>`;
 }
 
-function podVybava(v) {
+function podInfoPris(v) {
   return `
+  <div class="blok" data-blok="zaklad">
+    <div class="blok-hl"><h4>Základ</h4><div class="mezera"></div><button class="btn mala hlavni" data-akce="uloz-zaklad">Uložit</button></div>
+    <div class="rada r2">
+      ${pole({ k: 'nazev', p: 'Název', t: 'text' }, v.nazev)}
+      ${pole({ k: 'kategorie', p: 'Kategorie', t: 'select', moznosti: KATEGORIE_PRIS }, v.kategorie || 'jine')}
+      ${pole({ k: 'ks', p: 'Kolik kusů máme', t: 'cislo' }, v.ks ?? 1)}
+      ${pole({ k: 'aktivni', p: 'Stav', t: 'select', moznosti: [{ v: 'true', p: 'půjčuje se' }, { v: 'false', p: 'vyřazeno / rozbité' }] }, String(v.aktivni !== false))}
+      ${pole({ k: 'cenaDen', p: 'Cena za den (Kč)', t: 'cislo' }, v.cenaDen)}
+      ${pole({ k: 'kauce', p: 'Kauce (Kč)', t: 'cislo' }, v.kauce)}
+      ${pole({ k: 'porizovaci', p: 'Pořizovací cena (Kč)', t: 'cislo' }, v.porizovaci)}
+      ${pole({ k: 'barva', p: 'Barva v kalendáři', t: 'barva' }, v.barva)}
+    </div>
+    <div class="rada">${pole({ k: 'poznamka', p: 'Poznámka', t: 'textarea', ph: 'stav, kde je uskladněné, na co pozor…' }, v.poznamka)}</div>
+  </div>
+
+  <div class="blok">
+    <div class="blok-hl"><h4>Pasuje na vozy</h4><div class="mezera"></div><button class="btn mala hlavni" data-akce="uloz-navozy">Uložit</button></div>
+    <p style="font-size:12px;color:var(--khaki);margin:0 0 10px">Nech prázdné, když je to nezávislé na autě (kolo, paddleboard…).</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${autaSeznam().map((a) => `
+        <label class="stitek" style="cursor:pointer;padding:6px 10px;${(v.naVozy || []).includes(a.id) ? `background:${a.barva};color:var(--noc);border-color:${a.barva}` : ''}">
+          <input type="checkbox" class="skryto" data-na-vuz="${a.id}" ${(v.naVozy || []).includes(a.id) ? 'checked' : ''}>${esc(a.nazev)}
+        </label>`).join('')}
+    </div>
+  </div>
+
+  ${(() => {
+    const p = plVozu(v, { od: pridejDni(dnesISO(), -365), do: dnesISO(), dnu: 365 });
+    if (!cislo(v.porizovaci)) return '';
+    const pokryto = p.vynos / v.porizovaci;
+    return `<div class="blok"><div class="blok-hl"><h4>Návratnost</h4></div>
+      <div class="seznam-radek">Za posledních 12 měsíců vydělalo <b>&nbsp;${kc(p.vynos)}</b>&nbsp; z pořizovací ceny ${kc(v.porizovaci)} — ${Math.round(pokryto * 100)} %.</div></div>`;
+  })()}`;
+}
+
+function podVybava(v) {
+  const b = S.nastaveni.basicVybaveni || {};
+  const sdilene = [...(b.spolecne || []), ...(v.typ === 'obytnak' ? (b.obytnak || []) : [])];
+  return `
+  <div class="blok" style="background:var(--panel2)">
+    <div class="blok-hl"><h4>Basic vybavení — společný standard</h4><div class="mezera"></div>
+      <button class="btn mala nic" data-akce="na-prislusenstvi">upravit v Příslušenství</button></div>
+    ${sdilene.length ? `<div style="display:flex;gap:7px;flex-wrap:wrap">
+      ${sdilene.map((x) => `<span class="stitek">${esc(x.nazev)}${cislo(x.ks) > 1 ? ` ×${x.ks}` : ''}</span>`).join('')}
+    </div>` : '<div class="prazdno" style="padding:12px">Společný standard zatím není vyplněný.</div>'}
+  </div>
+
   <div class="blok" data-blok="vybava">
     <div class="blok-hl"><h4>Basic pack — jede s vozem vždy</h4><div class="mezera"></div><button class="btn mala" data-akce="pridej-vybavu"><svg class="icon"><use href="#i-plus"/></svg>Přidat věc</button></div>
     ${(v.vybava || []).length ? `<div class="pretece"><table class="tab"><thead><tr><th>Věc</th><th class="cislo">ks</th><th>Poznámka</th><th></th></tr></thead><tbody>
@@ -1041,7 +1205,11 @@ function kresliKalendar() {
 
   const denTyden = (d) => new Date(rok, mes - 1, d).getDay();
 
-  const lajny = S.vozy.filter((v) => v.aktivni !== false).map((v) => {
+  /* Auta mají lajnu vždy, příslušenství jen když je v tomhle měsíci půjčené —
+     jinak by mřížka měla dvacet prázdných řádků. */
+  const lajnyVozy = autaSeznam().filter((v) => v.aktivni !== false);
+  const lajnyPris = prisSeznam().filter((v) => rezervaceVozu(v.id).some((r) => r.od <= posledni && r.do >= prvni));
+  const lajny = [...lajnyVozy, ...lajnyPris].map((v) => {
     const rezky = rezervaceVozu(v.id).filter((r) => r.stav !== 'vraceno' || r.do >= prvni)
       .filter((r) => r.od <= posledni && r.do >= prvni);
     /* pásy do pater, když se překrývají */
@@ -1137,15 +1305,16 @@ function kresliSuplikRezervace(o) {
     <button class="hl-btn" data-akce="zavri"><svg class="icon"><use href="#i-krizek"/></svg></button>
   </div>
   <div class="s-telo">
+    ${[['Vozy', autaSeznam()], ['Příslušenství', prisSeznam()]].map(([nadpis, seznam]) => seznam.filter((v) => v.aktivni !== false).length ? `
     <div class="blok">
-      <div class="blok-hl"><h4>Vozy</h4></div>
+      <div class="blok-hl"><h4>${nadpis}</h4></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${S.vozy.filter((v) => v.aktivni !== false).map((v) => `
+        ${seznam.filter((v) => v.aktivni !== false).map((v) => `
           <label class="stitek" style="cursor:pointer;padding:6px 10px;${(n.vozy || []).includes(v.id) ? `background:${v.barva};color:var(--noc);border-color:${v.barva}` : ''}">
-            <input type="checkbox" class="skryto" data-rez-vuz="${v.id}" ${(n.vozy || []).includes(v.id) ? 'checked' : ''}>${esc(v.nazev)}
+            <input type="checkbox" class="skryto" data-rez-vuz="${v.id}" ${(n.vozy || []).includes(v.id) ? 'checked' : ''}>${esc(v.nazev)}${cislo(v.cenaDen) ? ` · ${kc(v.cenaDen)}` : ''}
           </label>`).join('')}
       </div>
-    </div>
+    </div>` : '').join('')}
     <div class="blok">
       <div class="blok-hl"><h4>Termín a peníze</h4></div>
       <div class="rada r2">
@@ -1201,6 +1370,21 @@ function dialogKm(r, rezim) {
     ${auta.map((v) => `<div class="rada" style="margin-bottom:8px">
       ${pole({ k: 'km-' + v.id, p: `${esc(v.nazev)} — stav tachometru`, t: 'cislo', ph: 'km' }, rezim === 'vydej' ? (odhadKm(v).km ?? '') : '')}
     </div>`).join('')}
+    ${(() => {
+      const b = S.nastaveni.basicVybaveni || {};
+      const veci = [
+        ...(b.spolecne || []).map((x) => x.nazev + (cislo(x.ks) > 1 ? ` ×${x.ks}` : '')),
+        ...(auta.some((v) => v.typ === 'obytnak') ? (b.obytnak || []).map((x) => x.nazev + (cislo(x.ks) > 1 ? ` ×${x.ks}` : '')) : []),
+        ...auta.flatMap((v) => (v.vybava || []).map((x) => x.nazev + (cislo(x.ks) > 1 ? ` ×${x.ks}` : ''))),
+        ...(r.vozy || []).map(vuz).filter(jePris).map((x) => x.nazev),
+      ].filter(Boolean);
+      if (!veci.length) return '';
+      return `<div class="blok" style="margin-bottom:0">
+        <div class="blok-hl"><h4>Co jede s vozem — odškrtej si</h4></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${veci.map((t) => `<label class="stitek" style="cursor:pointer"><input type="checkbox" style="width:auto;margin-right:5px">${esc(t)}</label>`).join('')}
+        </div></div>`;
+    })()}
     ${rezim === 'vrat' ? `<div class="rada">${pole({ k: 'pozn', p: 'Stav vozu / poznámka', t: 'text', ph: 'čistý, plná nádrž…' }, '')}</div>` : ''}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
       <button class="btn nic" data-akce="dialog-zavri">Zpět</button>
@@ -1250,8 +1434,7 @@ async function potvrdDialogKm(rezim, rid) {
 
 function kresliFinance() {
   const rozsah = obdobiRozsah();
-  const vozyAkt = S.vozy;
-  const ply = vozyAkt.map((v) => ({ v, pl: plVozu(v, rozsah) }));
+  const ply = [...autaSeznam(), ...prisSeznam()].map((v) => ({ v, pl: plVozu(v, rozsah) }));
   const celkemVynos = ply.reduce((a, x) => a + x.pl.vynos, 0);
   const celkemNasml = ply.reduce((a, x) => a + x.pl.vynosNasml, 0);
   const celkemNaklady = ply.reduce((a, x) => a + x.pl.naklady, 0);
@@ -1281,7 +1464,8 @@ function kresliFinance() {
       <table class="tab">
         <thead><tr><th>Vůz</th><th class="cislo">Výnos</th><th class="cislo">Nasmlouváno</th><th class="cislo">Leasing</th><th class="cislo">Pojistky</th><th class="cislo">Servis</th><th class="cislo">Marže</th><th style="min-width:130px">Obsazenost</th><th class="cislo" title="Kolik dní v měsíci musí vůz jet, aby pokryl fixní náklady">Break-even</th></tr></thead>
         <tbody>
-        ${ply.map(({ v, pl }) => `
+        ${ply.map(({ v, pl }, i) => `
+          ${i === autaSeznam().length && prisSeznam().length ? '<tr><td colspan="9" style="padding-top:14px;font:600 11px var(--mono);letter-spacing:.08em;color:var(--khaki-tm)">PŘÍSLUŠENSTVÍ</td></tr>' : ''}
           <tr>
             <td><span class="stitek plny" style="background:${v.barva}">${esc(v.nazev)}</span></td>
             <td class="cislo">${kc(pl.vynos)}</td>
@@ -1526,7 +1710,7 @@ function kresliSuplikNastaveni() {
         ${pole({ k: 'token', p: 'API token', t: 'text' }, t.token)}
       </div>
       <div class="rada">
-        ${S.vozy.filter((v) => v.typ !== 'stan').map((v) => pole({ k: 'dev-' + v.id, p: 'ID zařízení — ' + v.nazev, t: 'text', ph: 'deviceId z Traccaru' }, (t.zarizeni || {})[v.id])).join('')}
+        ${autaSeznam().map((v) => pole({ k: 'dev-' + v.id, p: 'ID zařízení — ' + v.nazev, t: 'text', ph: 'deviceId z Traccaru' }, (t.zarizeni || {})[v.id])).join('')}
       </div>
       ${t.url && t.token ? `<button class="btn mala" data-akce="test-traccar"><svg class="icon"><use href="#i-poloha"/></svg>Vyzkoušet spojení</button>` : ''}
     </div>
@@ -1727,8 +1911,9 @@ function kresliSuplikWebu(o) {
       ${webova.map((v) => `<div class="seznam-radek"><span><b>${esc(v.name)}</b> · ${esc(v.category || '')} · ${kc(v.price_per_day)}/den</span>${v.is_active === false ? '<span class="stitek">skrytý</span>' : ''}</div>`).join('') || '<div class="prazdno">Web nevrátil žádné vozy.</div>'}
     </div>
     <div class="blok">
-      <div class="blok-hl"><h4>Skutečná flotila v kokpitu (${S.vozy.filter((v) => v.aktivni !== false).length})</h4></div>
-      ${S.vozy.filter((v) => v.aktivni !== false).map((v) => `<div class="seznam-radek"><span><b>${esc(v.nazev)}</b> · ${kc(v.cenaDen)}/den</span></div>`).join('')}
+      <div class="blok-hl"><h4>Skutečná flotila v kokpitu (${autaSeznam().filter((v) => v.aktivni !== false).length} vozů + ${prisSeznam().filter((v) => v.aktivni !== false).length} příslušenství)</h4></div>
+      ${autaSeznam().filter((v) => v.aktivni !== false).map((v) => `<div class="seznam-radek"><span><b>${esc(v.nazev)}</b> · ${kc(v.cenaDen)}/den</span></div>`).join('')}
+      ${prisSeznam().filter((v) => v.aktivni !== false).map((v) => `<div class="seznam-radek"><span style="color:var(--khaki)">${esc(v.nazev)} · ${v.cenaDen == null ? 'bez ceny' : kc(v.cenaDen) + '/den'}</span></div>`).join('')}
     </div>
     <div class="blok">
       <div class="blok-hl"><h4>Prompt pro Lovable — aktualizace webu</h4><div class="mezera"></div><button class="btn mala hlavni" data-akce="kopiruj-prompt">Zkopírovat</button></div>
@@ -1743,7 +1928,7 @@ const WEBVOZY = { seznam: null };
 function rozdilyWebu() {
   if (!WEBVOZY.seznam) return [];
   const rozdily = [];
-  const nase = S.vozy.filter((v) => v.aktivni !== false);
+  const nase = autaSeznam().filter((v) => v.aktivni !== false);
   const sedi = (v, w) => String(w.name || '').toLowerCase().split(/\s+/)
     .some((slovo) => slovo.length > 3 && v.nazev.toLowerCase().includes(slovo));
   for (const v of nase) {
@@ -1759,9 +1944,11 @@ function rozdilyWebu() {
 }
 
 function lovablePrompt() {
-  const flotila = S.vozy.filter((v) => v.aktivni !== false).map((v) => ({
+  const doplnky = prisSeznam().filter((v) => v.aktivni !== false)
+    .map((v) => ({ name: v.nazev, price_per_day: v.cenaDen, ks: kusu(v), note: v.poznamka || '' }));
+  const flotila = autaSeznam().filter((v) => v.aktivni !== false).map((v) => ({
     name: v.nazev,
-    category: { pickup: 'Prémiový pick-up', obytnak: 'Obytný vůz', teren: 'Terénní vůz', dodavka: 'Kempingový vůz', stan: 'Střešní stan' }[v.typ] || v.typ,
+    category: { pickup: 'Prémiový pick-up', obytnak: 'Obytný vůz', teren: 'Terénní vůz', dodavka: 'Kempingový vůz' }[v.typ] || v.typ,
     price_per_day: v.cenaDen,
     description: v.poznamka || '',
     is_active: true,
@@ -1773,6 +1960,15 @@ kombinovat s Land Cruiserem, Mercedesem X i Multivanem, nebo půjčit samostatn�
 
 Skutečná flotila (JSON):
 ${JSON.stringify(flotila, null, 2)}
+
+Příslušenství, které se půjčuje zvlášť (samostatná sekce na webu, ne jako vůz — u rezervace
+ho zákazník přidává k vozu jako doplněk):
+${JSON.stringify(doplnky, null, 2)}
+
+Ke každé zápůjčce navíc patří „basic vybavení" (zdarma, na přání):
+${JSON.stringify((S.nastaveni.basicVybaveni?.spolecne || []).map((x) => x.nazev), null, 2)}
+a u obytného vozu ve standardu:
+${JSON.stringify((S.nastaveni.basicVybaveni?.obytnak || []).map((x) => x.nazev), null, 2)}
 
 Dále: rezervační formulář ukládej do tabulky "bookings" se sloupci name, email, phone,
 vehicle_id, start_date, end_date, message — kokpit si je odtud stahuje.`;
@@ -1948,11 +2144,25 @@ document.addEventListener('click', async (u) => {
       zavriSuplik();
     },
 
+    'nove-prislusenstvi': async () => {
+      const idN = uid('pr');
+      await uloz('Nové příslušenství', SOUBORY.vozy, (d) => {
+        d.vozy.push({ id: idN, druh: 'prislusenstvi', nazev: 'Nové příslušenství', kategorie: 'jine',
+          barva: '#A78BC0', ks: 1, aktivni: true, cenaDen: null, kauce: null, porizovaci: null,
+          naVozy: [], poznamka: '', tachometr: [], vybava: [], leasing: {}, pojisteni: [], servis: [], milniky: [] });
+      });
+      otevriSuplik({ typ: 'vuz', id: idN });
+    },
+    'uloz-navozy': () => {
+      const vybrane = $$('#suplik [data-na-vuz]').filter((ch) => ch.checked).map((ch) => ch.dataset.naVuz);
+      return ulozVuz('Upraveno, na co pasuje', o.id, (v) => { v.naVozy = vybrane; });
+    },
+
     'novy-vuz': async () => {
       const idN = uid('vuz');
       const barvy = ['#D97B4F', '#7FA65A', '#E3B341', '#6FA8AD', '#A78BC0', '#C46A85', '#7B8FC4'];
       await uloz('Nový vůz', SOUBORY.vozy, (d) => {
-        d.vozy.push({ id: idN, nazev: 'Nový vůz', typ: 'teren', barva: barvy[d.vozy.length % barvy.length], rok: null, spz: '', aktivni: true, cenaDen: null, kauce: null, poznamka: '', tachometr: [], vybava: [], leasing: {}, pojisteni: [], servis: [], milniky: [] });
+        d.vozy.push({ id: idN, druh: 'vuz', nazev: 'Nový vůz', typ: 'teren', barva: barvy[d.vozy.length % barvy.length], rok: null, spz: '', aktivni: true, cenaDen: null, kauce: null, poznamka: '', tachometr: [], vybava: [], leasing: {}, pojisteni: [], servis: [], milniky: [] });
       });
       otevriSuplik({ typ: 'vuz', id: idN });
     },
@@ -2098,6 +2308,26 @@ document.addEventListener('click', async (u) => {
       return uloz('Vklad smazán', SOUBORY.finance, (d) => { d.investice = d.investice.filter((i) => i.id !== id); });
     },
 
+    'pridej-basic': () => uloz('Basic vybavení doplněno', SOUBORY.nastaveni, (d) => {
+      d.basicVybaveni = d.basicVybaveni || { spolecne: [], obytnak: [] };
+      const klic = el.dataset.klic;
+      d.basicVybaveni[klic] = d.basicVybaveni[klic] || [];
+      d.basicVybaveni[klic].push({ id: uid('bv'), nazev: '', ks: 1 });
+    }),
+    'uloz-basic': () => {
+      const hodnoty = sesbirej(el.parentElement.closest('[data-basic-id]'));
+      const klic = el.dataset.klic;
+      return uloz('Basic vybavení upraveno', SOUBORY.nastaveni, (d) => {
+        const x = (d.basicVybaveni?.[klic] || []).find((y) => y.id === id);
+        if (x) Object.assign(x, hodnoty);
+      });
+    },
+    'smaz-basic': () => uloz('Basic vybavení zkráceno', SOUBORY.nastaveni, (d) => {
+      const klic = el.dataset.klic;
+      if (d.basicVybaveni?.[klic]) d.basicVybaveni[klic] = d.basicVybaveni[klic].filter((y) => y.id !== id);
+    }),
+
+    'na-prislusenstvi': () => { zavriSuplik(); UI.zalozka = 'prislusenstvi'; localStorage.setItem('poutnik.zalozka', UI.zalozka); vykresli(); },
     'nacti-gps': () => nactiZGps(),
     'nacti-web': () => nactiPoptavkyZWebu(),
     'porovnat-web': () => porovnejSWebem(),

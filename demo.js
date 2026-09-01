@@ -118,7 +118,8 @@ window.DEMO_DATA = {
       "hodnota": "2026-12-31",
       "pozn": ""
      }
-    ]
+    ],
+    "druh": "vuz"
    },
    {
     "id": "vuz-hobby",
@@ -238,7 +239,8 @@ window.DEMO_DATA = {
       "hodnota": null,
       "pozn": ""
      }
-    ]
+    ],
+    "druh": "vuz"
    },
    {
     "id": "vuz-landcruiser",
@@ -327,7 +329,8 @@ window.DEMO_DATA = {
       "hodnota": 74000,
       "pozn": ""
      }
-    ]
+    ],
+    "druh": "vuz"
    },
    {
     "id": "vuz-multivan",
@@ -416,7 +419,8 @@ window.DEMO_DATA = {
       "hodnota": 30000,
       "pozn": "dle plánu VW"
      }
-    ]
+    ],
+    "druh": "vuz"
    },
    {
     "id": "asset-stan",
@@ -468,6 +472,240 @@ window.DEMO_DATA = {
     },
     "pojisteni": [],
     "servis": [],
+    "milniky": [],
+    "druh": "prislusenstvi",
+    "kategorie": "spani",
+    "ks": 1,
+    "porizovaci": 38000
+   },
+   {
+    "id": "pr-kolobezka",
+    "druh": "prislusenstvi",
+    "nazev": "Elektrická koloběžka",
+    "kategorie": "mobilita",
+    "typ": "prislusenstvi",
+    "barva": "#7FA65A",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 400,
+    "kauce": 2000,
+    "porizovaci": 18000,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-box",
+    "druh": "prislusenstvi",
+    "nazev": "Střešní box 600 l",
+    "kategorie": "nosic",
+    "typ": "prislusenstvi",
+    "barva": "#D97B4F",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 250,
+    "kauce": 2000,
+    "porizovaci": 12000,
+    "naVozy": [],
+    "poznamka": "Rakev na střechu, 600 l.",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-paddle",
+    "druh": "prislusenstvi",
+    "nazev": "Paddleboard",
+    "kategorie": "voda",
+    "typ": "prislusenstvi",
+    "barva": "#6FA8AD",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 300,
+    "kauce": 2000,
+    "porizovaci": 9000,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-povleceni",
+    "druh": "prislusenstvi",
+    "nazev": "Povlečení + peřina a polštář",
+    "kategorie": "spani",
+    "typ": "prislusenstvi",
+    "barva": "#A78BC0",
+    "ks": 4,
+    "aktivni": true,
+    "cenaDen": 150,
+    "kauce": 0,
+    "porizovaci": 6000,
+    "naVozy": [],
+    "poznamka": "Sada na osobu.",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-stan4",
+    "druh": "prislusenstvi",
+    "nazev": "Stan pro 4 osoby",
+    "kategorie": "spani",
+    "typ": "prislusenstvi",
+    "barva": "#B08BC0",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 350,
+    "kauce": 2000,
+    "porizovaci": 8000,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-stan6",
+    "druh": "prislusenstvi",
+    "nazev": "Velký stan pro 6 osob s předsíní",
+    "kategorie": "spani",
+    "typ": "prislusenstvi",
+    "barva": "#C08BB8",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 500,
+    "kauce": 3000,
+    "porizovaci": 15000,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-kolo-full",
+    "druh": "prislusenstvi",
+    "nazev": "Celoodpružené kolo 26\"",
+    "kategorie": "kola",
+    "typ": "prislusenstvi",
+    "barva": "#E3B341",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 450,
+    "kauce": 5000,
+    "porizovaci": 42000,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-kolo-hard",
+    "druh": "prislusenstvi",
+    "nazev": "Odpružené kolo 26\"",
+    "kategorie": "kola",
+    "typ": "prislusenstvi",
+    "barva": "#D9A93D",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 350,
+    "kauce": 4000,
+    "porizovaci": 22000,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-kolo-deti",
+    "druh": "prislusenstvi",
+    "nazev": "Dětské kolo 22\"",
+    "kategorie": "kola",
+    "typ": "prislusenstvi",
+    "barva": "#C9963A",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 200,
+    "kauce": 2000,
+    "porizovaci": 7000,
+    "naVozy": [],
+    "poznamka": "Velikost ověřit.",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
+    "milniky": []
+   },
+   {
+    "id": "pr-odrazedlo",
+    "druh": "prislusenstvi",
+    "nazev": "Dětské odrážedlo",
+    "kategorie": "kola",
+    "typ": "prislusenstvi",
+    "barva": "#BE8A37",
+    "ks": 1,
+    "aktivni": true,
+    "cenaDen": 100,
+    "kauce": 500,
+    "porizovaci": 2500,
+    "naVozy": [],
+    "poznamka": "",
+    "spz": "",
+    "rok": null,
+    "tachometr": [],
+    "vybava": [],
+    "leasing": {},
+    "pojisteni": [],
+    "servis": [],
     "milniky": []
    }
   ]
@@ -517,14 +755,16 @@ window.DEMO_DATA = {
    {
     "id": "rz-3",
     "vozy": [
-     "vuz-landcruiser"
+     "vuz-landcruiser",
+     "pr-kolo-full",
+     "pr-kolo-hard"
     ],
     "od": "2026-08-21",
     "do": "2026-08-27",
     "stav": "potvrzeno",
     "kontakt": null,
     "jmeno": "Marek Beneš",
-    "castka": 19200,
+    "castka": 24000,
     "zaloha": 5000,
     "zdroj": "znamy",
     "kmPred": null,
@@ -556,7 +796,8 @@ window.DEMO_DATA = {
    {
     "id": "rz-5",
     "vozy": [
-     "vuz-mercedes-x"
+     "vuz-mercedes-x",
+     "pr-box"
     ],
     "od": "2026-08-28",
     "do": "2026-09-04",
@@ -761,6 +1002,57 @@ window.DEMO_DATA = {
   "supabase": {
    "url": "https://sjhqhsjaifrakfcwitje.supabase.co",
    "anonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNqaHFoc2phaWZyYWtmY3dpdGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcxOTc5NzcsImV4cCI6MjA4Mjc3Mzk3N30.qzmecPoikC1eZIkkKZEIL8b9B1y4CR3OoqwoP36LSBc"
+  },
+  "basicVybaveni": {
+   "spolecne": [
+    {
+     "id": "bv-zidle",
+     "nazev": "Kempingová židle",
+     "ks": 2
+    },
+    {
+     "id": "bv-stul",
+     "nazev": "Stůl",
+     "ks": 1
+    },
+    {
+     "id": "bv-baterka",
+     "nazev": "Baterka",
+     "ks": 1
+    },
+    {
+     "id": "bv-nadobi",
+     "nazev": "Nádobí",
+     "ks": 1
+    }
+   ],
+   "obytnak": [
+    {
+     "id": "bv-tableta",
+     "nazev": "Tableta do záchodu",
+     "ks": 1
+    },
+    {
+     "id": "bv-voda",
+     "nazev": "Plná nádrž vody",
+     "ks": 1
+    },
+    {
+     "id": "bv-kabel",
+     "nazev": "Kabel na připojení do sítě",
+     "ks": 1
+    },
+    {
+     "id": "bv-plyn",
+     "nazev": "Plná plynová bomba",
+     "ks": 2
+    },
+    {
+     "id": "bv-loznice",
+     "nazev": "Povlečení + peřina a polštář (4 osoby)",
+     "ks": 4
+    }
+   ]
   }
  }
 };
