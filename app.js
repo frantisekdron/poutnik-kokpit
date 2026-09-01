@@ -111,6 +111,9 @@ const SOUBORY = {
   nastaveni: 'data/nastaveni.json',
   kos: 'data/kos.json',
 };
+/* Soubory, které v repu ještě nemusí být (přibyly později) — 404 u nich
+   neznamená rozbitý přístup, jen prázdno. */
+const VOLITELNE = new Set(['data/kos.json']);
 
 const GH = {
   token: null,
@@ -162,6 +165,10 @@ const GH = {
     if (podminene && GH.etag[soubor]) hlavicky['If-None-Match'] = GH.etag[soubor];
     const r = await GH.volej(`${GH.cesta(soubor)}?ref=${CFG.branch}`, { headers: hlavicky });
     if (r.status === 304) return { zmeneno: false };
+    if (r.status === 404 && VOLITELNE.has(soubor)) {
+      GH.mezipamet[soubor] = { data: {}, sha: undefined };
+      return { zmeneno: true, data: {}, sha: undefined };
+    }
     if (!r.ok) throw await GH.selhalo(r);
     const j = await r.json();
     const data = JSON.parse(b64NaText(j.content));
@@ -415,18 +422,30 @@ function nazevZaznamu(objekt) {
 }
 
 /* Uloží kopii do koše a teprve po úspěchu spustí vlastní odstranění. */
-async function doKose(misto, objekt, odstran, { vuzId = null, popisNavic = '' } = {}) {
+async function doKose(misto, objekt, odstran, { vuzId = null, servisId = null, popisNavic = '' } = {}) {
+  if (!objekt) return hlaska('Tuhle věc už někdo smazal.', 'chyba');
   const zaznam = {
-    id: uid('ks'), kdy: nyni(), kdo: JA.jmeno, misto, vuzId,
+    id: uid('ks'), kdy: nyni(), kdo: JA.jmeno, misto, vuzId, servisId,
     nazev: nazevZaznamu(objekt) + (popisNavic ? ' — ' + popisNavic : ''),
     data: structuredClone(objekt),
   };
   const uspech = await uloz(`Do koše: ${popisKose(misto)} — ${zaznam.nazev}`, SOUBORY.kos, (d) => {
     d.polozky = d.polozky || [];
     d.polozky.unshift(zaznam);
+    /* Koš nesmí přerůst limit Contents API, jinak by se appka nenačetla. */
+    while (d.polozky.length > 200) d.polozky.pop();
   });
   if (!uspech) return false;
-  return odstran();
+
+  let hotovo = false;
+  try { hotovo = await odstran(); } catch { hotovo = false; }
+  if (!hotovo) {
+    /* Odstranění neprošlo — kopii z koše zase pryč, ať věc není živá i v koši. */
+    await uloz('Zrušen zápis v koši (odstranění neprošlo)', SOUBORY.kos,
+      (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id); });
+    return false;
+  }
+  return hotovo;
 }
 
 /* Vrátí věc z koše zpátky. Části vozu potřebují, aby vůz pořád existoval. */
@@ -436,6 +455,9 @@ async function zKose(zaznam) {
     const v = vuz(zaznam.vuzId);
     if (!v) return hlaska('Vůz, ke kterému to patřilo, už neexistuje. Obnov nejdřív jeho.', 'chyba');
     if (zaznam.misto === 'vuz:dokument') {
+      if (!(v.servis || []).some((y) => y.id === zaznam.servisId)) {
+        return hlaska('Zápis v servisce, ke kterému příloha patřila, už neexistuje. Obnov nejdřív jeho.', 'chyba');
+      }
       const ok = await ulozVuz(`Obnovena příloha ${zaznam.nazev}`, zaznam.vuzId, (x) => {
         const z = (x.servis || []).find((y) => y.id === zaznam.servisId);
         if (z) { z.dokumenty = z.dokumenty || []; if (!z.dokumenty.some((d) => d.cesta === zaznam.data.cesta)) z.dokumenty.push(zaznam.data); }
@@ -453,22 +475,48 @@ async function zKose(zaznam) {
 
   const misto = KOS_MISTA[zaznam.misto];
   if (!misto) return hlaska('Tuhle věc neumím vrátit — napiš mi to.', 'chyba');
+  /* Vůz mohl mezitím zmizet — mrtvé id by rezervaci tiše vyhodilo z kalendáře i z financí. */
+  let data = zaznam.data;
+  let ztracene = [];
+  if (zaznam.misto === 'rezervace') {
+    ztracene = (data.vozy || []).filter((x) => !vuz(x));
+    if (ztracene.length) data = { ...data, vozy: (data.vozy || []).filter((x) => vuz(x)) };
+  }
   const ok = await uloz(`Vráceno z koše: ${zaznam.nazev}`, misto.soubor(), (d) => {
     const seznam = misto.seznam(d);
-    if (!seznam.some((x) => x.id === zaznam.data.id)) seznam.push(zaznam.data);
+    /* obnoveno = příznak pro rozesílání mailů, ať se to nehlásí jako novinka */
+    if (!seznam.some((x) => x.id === data.id)) seznam.push({ ...data, obnoveno: nyni() });
   });
+  if (ok && ztracene.length) hlaska(`Vráceno, ale ${ztracene.length}× vůz už neexistuje — přiřaď rezervaci nový.`, 'chyba');
   if (ok) await uloz('Vráceno z koše', SOUBORY.kos, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id); });
   return ok;
 }
 
-/* Trvalé smazání — teprve tady mizí i nahraný soubor z repa. */
+/* Všechny nahrané soubory, které záznam drží — i ty schované v servisních zápisech. */
+function souboryZaznamu(data) {
+  const cesty = new Set();
+  (function projdi(x) {
+    if (!x || typeof x !== 'object') return;
+    if (Array.isArray(x)) return x.forEach(projdi);
+    if (typeof x.cesta === 'string' && x.cesta.startsWith('docs/')) cesty.add(x.cesta);
+    Object.values(x).forEach(projdi);
+  })(data);
+  return [...cesty];
+}
+
+/* Trvalé smazání — teprve tady mizí i nahrané soubory z repa. */
 async function vyhodZKose(zaznam) {
-  if (zaznam.misto === 'vuz:dokument' && zaznam.data?.cesta) {
-    try { await GH.smazSoubor(zaznam.data.cesta, 'Trvale smazána příloha ' + zaznam.nazev); } catch { /* už není */ }
-  }
-  return uloz(`Trvale smazáno: ${zaznam.nazev}`, SOUBORY.kos, (d) => {
+  const ok = await uloz(`Trvale smazáno: ${zaznam.nazev}`, SOUBORY.kos, (d) => {
     d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id);
   });
+  if (!ok) return false;
+  /* Soubor smazat jen tehdy, když na něj neukazuje nic živého ani jiný záznam koše. */
+  const zive = new Set([...souboryZaznamu(S.vozy), ...souboryZaznamu(S.kos.map((z) => z.data))]);
+  for (const cesta of souboryZaznamu(zaznam.data)) {
+    if (zive.has(cesta)) continue;
+    try { await GH.smazSoubor(cesta, 'Trvale smazáno: ' + zaznam.nazev); } catch { /* už není */ }
+  }
+  return true;
 }
 
 /* Změna jednoho vozu / jedné položky podle ID — bezpečné i po sloučení s cizí verzí. */
@@ -2331,7 +2379,9 @@ document.addEventListener('click', async (u) => {
     'rez-vrat': () => dialogKm(S.rezervace.find((r) => r.id === id), 'vrat'),
     'rez-zrus': async () => {
       const r = S.rezervace.find((x) => x.id === id);
-      const doKos = confirm(`Zrušit rezervaci ${jmenoRez(r)}?\n\nOK = uklidit do koše (půjde vrátit)\nZrušit = jen označit jako zrušenou a nechat v seznamu`);
+      /* Klasické ano/ne první — Escape i křížek nechají rezervaci být. */
+      if (!confirm(`Zrušit rezervaci ${jmenoRez(r)}?`)) return;
+      const doKos = confirm('Jak ji zrušit?\n\nOK = uklidit do koše (půjde vrátit)\nZrušit = jen označit jako zrušenou a nechat v seznamu');
       if (doKos) {
         await doKose('rezervace', r, () => uloz('Rezervace do koše', SOUBORY.rezervace, (d) => { d.polozky = d.polozky.filter((x) => x.id !== id); }));
       } else {
@@ -2441,7 +2491,7 @@ document.addEventListener('click', async (u) => {
       return doKose('vuz:dokument', zaznamKose,
         /* mazat podle cesty, ne indexu — index se při souběhu rozjede */
         () => ulozVuz('Příloha do koše', o.id, (v) => { const zz = v.servis.find((s) => s.id === id); if (zz && zz.dokumenty) zz.dokumenty = zz.dokumenty.filter((d) => d.cesta !== cesta); }),
-        { vuzId: o.id, popisNavic: vuz(o.id)?.nazev });
+        { vuzId: o.id, servisId: id, popisNavic: vuz(o.id)?.nazev });
     },
 
     'pridej-tacho': async () => {
@@ -2581,20 +2631,34 @@ document.addEventListener('click', async (u) => {
     },
 
     'na-prislusenstvi': () => { zavriSuplik(); UI.zalozka = 'prislusenstvi'; localStorage.setItem('poutnik.zalozka', UI.zalozka); vykresli(); },
-    'kos-vrat': () => zKose(S.kos.find((x) => x.id === id)),
+    'kos-vrat': () => {
+      const z = S.kos.find((x) => x.id === id);
+      if (!z) { kresliSuplik(); return hlaska('Tahle položka už v koši není — parťák ji mezitím vrátil nebo vyhodil.', 'chyba'); }
+      return zKose(z);
+    },
     'kos-vyhod': async () => {
       const z = S.kos.find((x) => x.id === id);
       if (!z || !confirm(`Smazat „${z.nazev}" natrvalo? Tohle už vrátit nepůjde.`)) return;
       return vyhodZKose(z);
     },
     'vysyp-kos': async () => {
-      if (!confirm(`Vyhodit všech ${S.kos.length} věcí z koše natrvalo? Tohle už vrátit nepůjde.`)) return;
-      for (const z of [...S.kos]) {
-        if (z.misto === 'vuz:dokument' && z.data?.cesta) {
-          try { await GH.smazSoubor(z.data.cesta, 'Vysypán koš'); } catch { /* už není */ }
+      const vyhazuji = [...S.kos];
+      if (!vyhazuji.length) return;
+      if (!confirm(`Vyhodit všech ${vyhazuji.length} věcí z koše natrvalo? Tohle už vrátit nepůjde.`)) return;
+      /* Mazat výčtem id, ne celé pole — parťák mohl mezitím něco přidat. */
+      const mazu = new Set(vyhazuji.map((z) => z.id));
+      const ok = await uloz('Koš vysypán', SOUBORY.kos, (d) => {
+        d.polozky = (d.polozky || []).filter((x) => !mazu.has(x.id));
+      });
+      if (!ok) return false;
+      const zive = new Set(souboryZaznamu(S.vozy));
+      for (const z of vyhazuji) {
+        for (const cesta of souboryZaznamu(z.data)) {
+          if (zive.has(cesta)) continue;
+          try { await GH.smazSoubor(cesta, 'Vysypán koš'); } catch { /* už není */ }
         }
       }
-      return uloz('Koš vysypán', SOUBORY.kos, (d) => { d.polozky = []; });
+      return true;
     },
 
     'nacti-gps': () => nactiZGps(),
@@ -2611,7 +2675,8 @@ document.addEventListener('click', async (u) => {
       return uloz('Nastavení upraveno', SOUBORY.nastaveni, (d) => {
         const jmena = [hodnoty.partner0 || 'Parťák 1', hodnoty.partner1 || 'Parťák 2'];
         d.partneri = jmena;
-        d.maily = { [jmena[0]]: hodnoty.mail0 || '', [jmena[1]]: hodnoty.mail1 || '' };
+        /* Sloučit, ne přepsat — jinak by přejmenování parťáka zahodilo adresu. */
+        d.maily = { ...(d.maily || {}), [jmena[0]]: hodnoty.mail0 || '', [jmena[1]]: hodnoty.mail1 || '' };
         d.kmDenOdhad = hodnoty.kmDenOdhad || 140;
         d.sazbaHodina = hodnoty.sazbaHodina || 0;
       });
@@ -2650,6 +2715,7 @@ document.addEventListener('click', async (u) => {
     el.dataset.bezi = '1';
     if (el instanceof HTMLButtonElement) el.disabled = true;
     try { await akceMapa[akce](); }
+    catch (e) { hlaska(e.message || 'Akce se nepovedla.', 'chyba'); }
     finally { delete el.dataset.bezi; if (el instanceof HTMLButtonElement) el.disabled = false; }
   }
 });
