@@ -1053,6 +1053,39 @@ window.DEMO_DATA = {
      "ks": 4
     }
    ]
+  },
+  "maily": {
+   "Franta": "",
+   "Parťák": ""
+  },
+  "upozorneni": {
+   "zap": true,
+   "rannihlaseni": true,
+   "kopie": ""
   }
+ },
+ "data/kos.json": {
+  "polozky": [
+   {
+    "id": "ks-demo",
+    "kdy": "2026-08-30T10:00:00.000Z",
+    "kdo": "Parťák",
+    "misto": "ukoly",
+    "vuzId": null,
+    "nazev": "Zkusit inzerát na Bazoši",
+    "data": {
+     "id": "uk-smazany",
+     "text": "Zkusit inzerát na Bazoši",
+     "kategorie": "marketing",
+     "vuz": null,
+     "kdo": "Parťák",
+     "priorita": "nizka",
+     "stav": "otevreny",
+     "termin": "",
+     "vytvoril": "Parťák",
+     "vytvoreno": "2026-08-20T10:00:00.000Z"
+    }
+   }
+  ]
  }
 };

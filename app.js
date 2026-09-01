@@ -109,6 +109,7 @@ const SOUBORY = {
   ukoly: 'data/ukoly.json',
   finance: 'data/finance.json',
   nastaveni: 'data/nastaveni.json',
+  kos: 'data/kos.json',
 };
 
 const GH = {
@@ -258,6 +259,7 @@ const JA = { jmeno: null };
 const S = {
   vozy: [], rezervace: [], kontakty: [], ukoly: [],
   finance: { marketing: [], investice: [], odkazy: [] },
+  kos: [],
   nastaveni: { partneri: ['Franta', 'Parťák'], kmDenOdhad: 140, sazbaHodina: 300, traccar: {}, supabase: {} },
 };
 const UI = {
@@ -298,6 +300,7 @@ function prevezmi(soubor, data) {
   else if (soubor === SOUBORY.ukoly) S.ukoly = data.polozky || [];
   else if (soubor === SOUBORY.finance) S.finance = { marketing: [], investice: [], odkazy: [], ...data };
   else if (soubor === SOUBORY.nastaveni) S.nastaveni = { ...S.nastaveni, ...data };
+  else if (soubor === SOUBORY.kos) S.kos = data.polozky || [];
 }
 
 async function nactiVse() {
@@ -376,6 +379,96 @@ async function uloz(zprava, soubor, uprav) {
     UI.ukladam--;
     if (!UI.ukladam) $('#btn-obnovit').classList.remove('tocise');
   }
+}
+
+/* ---------------------------------------------------------- koš
+
+   Nic se nemaže natvrdo. Smazaná věc jde nejdřív do koše (vlastní soubor,
+   vlastní commit) a teprve pak zmizí ze seznamu — když zápis do koše selže,
+   původní data zůstanou. Obnovení vrátí objekt tam, odkud přišel. */
+
+const KOS_MISTA = {
+  vozy: { soubor: () => SOUBORY.vozy, seznam: (d) => (d.vozy = d.vozy || []), popis: 'Vůz / příslušenství' },
+  rezervace: { soubor: () => SOUBORY.rezervace, seznam: (d) => (d.polozky = d.polozky || []), popis: 'Rezervace' },
+  kontakty: { soubor: () => SOUBORY.kontakty, seznam: (d) => (d.polozky = d.polozky || []), popis: 'Kontakt' },
+  ukoly: { soubor: () => SOUBORY.ukoly, seznam: (d) => (d.polozky = d.polozky || []), popis: 'Úkol' },
+  marketing: { soubor: () => SOUBORY.finance, seznam: (d) => (d.marketing = d.marketing || []), popis: 'Útrata za marketing' },
+  investice: { soubor: () => SOUBORY.finance, seznam: (d) => (d.investice = d.investice || []), popis: 'Vklad' },
+  'basic:spolecne': { soubor: () => SOUBORY.nastaveni, seznam: (d) => ((d.basicVybaveni = d.basicVybaveni || {}).spolecne = d.basicVybaveni.spolecne || []), popis: 'Basic vybavení' },
+  'basic:obytnak': { soubor: () => SOUBORY.nastaveni, seznam: (d) => ((d.basicVybaveni = d.basicVybaveni || {}).obytnak = d.basicVybaveni.obytnak || []), popis: 'Basic vybavení obytňáku' },
+};
+/* Části vozu — potřebují navíc id vozu. */
+const KOS_VE_VOZE = {
+  'vuz:pojisteni': { pole: 'pojisteni', popis: 'Pojistka' },
+  'vuz:vybava': { pole: 'vybava', popis: 'Věc z vybavení' },
+  'vuz:servis': { pole: 'servis', popis: 'Zápis v servisce' },
+  'vuz:tachometr': { pole: 'tachometr', popis: 'Zápis tachometru' },
+  'vuz:milniky': { pole: 'milniky', popis: 'Milník' },
+  'vuz:dokument': { pole: null, popis: 'Příloha' },
+};
+
+const popisKose = (misto) => (KOS_MISTA[misto] || KOS_VE_VOZE[misto] || {}).popis || 'Záznam';
+
+function nazevZaznamu(objekt) {
+  return objekt?.nazev || objekt?.jmeno || objekt?.text || objekt?.kampan || objekt?.popis
+    || objekt?.druh || objekt?.nadpis || (objekt?.km != null ? fmtKc.format(objekt.km) + ' km' : '') || 'bez názvu';
+}
+
+/* Uloží kopii do koše a teprve po úspěchu spustí vlastní odstranění. */
+async function doKose(misto, objekt, odstran, { vuzId = null, popisNavic = '' } = {}) {
+  const zaznam = {
+    id: uid('ks'), kdy: nyni(), kdo: JA.jmeno, misto, vuzId,
+    nazev: nazevZaznamu(objekt) + (popisNavic ? ' — ' + popisNavic : ''),
+    data: structuredClone(objekt),
+  };
+  const uspech = await uloz(`Do koše: ${popisKose(misto)} — ${zaznam.nazev}`, SOUBORY.kos, (d) => {
+    d.polozky = d.polozky || [];
+    d.polozky.unshift(zaznam);
+  });
+  if (!uspech) return false;
+  return odstran();
+}
+
+/* Vrátí věc z koše zpátky. Části vozu potřebují, aby vůz pořád existoval. */
+async function zKose(zaznam) {
+  const veVoze = KOS_VE_VOZE[zaznam.misto];
+  if (veVoze) {
+    const v = vuz(zaznam.vuzId);
+    if (!v) return hlaska('Vůz, ke kterému to patřilo, už neexistuje. Obnov nejdřív jeho.', 'chyba');
+    if (zaznam.misto === 'vuz:dokument') {
+      const ok = await ulozVuz(`Obnovena příloha ${zaznam.nazev}`, zaznam.vuzId, (x) => {
+        const z = (x.servis || []).find((y) => y.id === zaznam.servisId);
+        if (z) { z.dokumenty = z.dokumenty || []; if (!z.dokumenty.some((d) => d.cesta === zaznam.data.cesta)) z.dokumenty.push(zaznam.data); }
+      });
+      if (ok) await uloz('Vráceno z koše', SOUBORY.kos, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id); });
+      return ok;
+    }
+    const ok = await ulozVuz(`Vráceno z koše: ${zaznam.nazev}`, zaznam.vuzId, (x) => {
+      x[veVoze.pole] = x[veVoze.pole] || [];
+      if (!x[veVoze.pole].some((y) => y.id === zaznam.data.id)) x[veVoze.pole].push(zaznam.data);
+    });
+    if (ok) await uloz('Vráceno z koše', SOUBORY.kos, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id); });
+    return ok;
+  }
+
+  const misto = KOS_MISTA[zaznam.misto];
+  if (!misto) return hlaska('Tuhle věc neumím vrátit — napiš mi to.', 'chyba');
+  const ok = await uloz(`Vráceno z koše: ${zaznam.nazev}`, misto.soubor(), (d) => {
+    const seznam = misto.seznam(d);
+    if (!seznam.some((x) => x.id === zaznam.data.id)) seznam.push(zaznam.data);
+  });
+  if (ok) await uloz('Vráceno z koše', SOUBORY.kos, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id); });
+  return ok;
+}
+
+/* Trvalé smazání — teprve tady mizí i nahraný soubor z repa. */
+async function vyhodZKose(zaznam) {
+  if (zaznam.misto === 'vuz:dokument' && zaznam.data?.cesta) {
+    try { await GH.smazSoubor(zaznam.data.cesta, 'Trvale smazána příloha ' + zaznam.nazev); } catch { /* už není */ }
+  }
+  return uloz(`Trvale smazáno: ${zaznam.nazev}`, SOUBORY.kos, (d) => {
+    d.polozky = (d.polozky || []).filter((x) => x.id !== zaznam.id);
+  });
 }
 
 /* Změna jednoho vozu / jedné položky podle ID — bezpečné i po sloučení s cizí verzí. */
@@ -752,6 +845,10 @@ function vykresli() {
   zp.textContent = varovani.length;
   zp.classList.toggle('skryto', !varovani.length);
 
+  const kp = $('#kos-pocet');
+  kp.textContent = S.kos.length;
+  kp.classList.toggle('skryto', !S.kos.length);
+
   $('#ja-inic').textContent = iniciely(JA.jmeno);
   $('#ja-jmeno').textContent = JA.jmeno || '';
 
@@ -1027,6 +1124,7 @@ function kresliSuplik() {
   if (o.typ === 'nastaveni') return kresliSuplikNastaveni(o);
   if (o.typ === 'kontrolky') return kresliSuplikKontrolky(o);
   if (o.typ === 'web') return kresliSuplikWebu(o);
+  if (o.typ === 'kos') return kresliSuplikKose(o);
 }
 
 const POD_VUZ = [
@@ -1762,9 +1860,25 @@ function kresliSuplikNastaveni() {
       <div class="blok-hl"><h4>Parťáci a odhady</h4><div class="mezera"></div><button class="btn mala hlavni" data-akce="uloz-nastaveni">Uložit</button></div>
       <div class="rada r2">
         ${pole({ k: 'partner0', p: 'Parťák 1', t: 'text' }, (n.partneri || [])[0])}
+        ${pole({ k: 'mail0', p: 'Jeho e-mail (pro upozornění)', t: 'text', ph: 'jmeno@email.cz' }, (n.maily || {})[(n.partneri || [])[0]])}
         ${pole({ k: 'partner1', p: 'Parťák 2', t: 'text' }, (n.partneri || [])[1])}
+        ${pole({ k: 'mail1', p: 'Jeho e-mail (pro upozornění)', t: 'text', ph: 'jmeno@email.cz' }, (n.maily || {})[(n.partneri || [])[1]])}
         ${pole({ k: 'kmDenOdhad', p: 'Výchozí odhad km/den výpůjčky', t: 'cislo' }, n.kmDenOdhad)}
         ${pole({ k: 'sazbaHodina', p: 'Sazba za hodinu práce (vklady, Kč)', t: 'cislo' }, n.sazbaHodina)}
+      </div>
+    </div>
+
+    <div class="blok">
+      <div class="blok-hl"><h4>Upozornění na e-mail</h4><div class="mezera"></div><button class="btn mala hlavni" data-akce="uloz-upozorneni">Uložit</button></div>
+      <p style="font-size:12.5px;color:var(--khaki);margin:0 0 10px">
+        Maily rozesílá GitHub po každém zápisu — chodí <b>tomu druhému</b>, ne tomu, kdo změnu udělal.
+        Ráno navíc přijde přehled dne. Odesílá se z honza@frantisekdron.cz.</p>
+      <div class="rada r2">
+        ${pole({ k: 'zap', p: 'Posílat upozornění', t: 'select', moznosti: [{ v: 'true', p: 'ano' }, { v: 'false', p: 'ne, mít klid' }] }, String((n.upozorneni || {}).zap !== false))}
+        ${pole({ k: 'rannihlaseni', p: 'Ranní přehled dne', t: 'select', moznosti: [{ v: 'true', p: 'ano, každé ráno' }, { v: 'false', p: 'ne' }] }, String((n.upozorneni || {}).rannihlaseni !== false))}
+      </div>
+      <div class="rada">
+        ${pole({ k: 'kopie', p: 'Kopie navíc (nepovinné, oddělené čárkou)', t: 'text', ph: 'ucetni@firma.cz' }, (n.upozorneni || {}).kopie)}
       </div>
     </div>
     <div class="blok">
@@ -1869,6 +1983,37 @@ function kresliSuplikKontrolky() {
         ${k.vuz ? `<button class="btn mala nic" data-otevri-vuz="${k.vuz.id}">otevřít</button>` : ''}
         ${k.rez ? `<button class="btn mala nic" data-otevri-rez="${k.rez.id}">otevřít</button>` : ''}
       </div>`).join('') : '<div class="prazdno">Nic nesvítí. Paráda.</div>'}
+  </div>`;
+}
+
+/* ---------------------------------------------------------- KOŠ */
+
+function kresliSuplikKose() {
+  const polozky = [...S.kos].sort((a, b) => (b.kdy || '').localeCompare(a.kdy || ''));
+  $('#suplik').innerHTML = `
+  <div class="s-hl">
+    <h2>Koš</h2>
+    <div style="flex:1"></div>
+    ${polozky.length ? '<button class="btn nic mala pozor" data-akce="vysyp-kos">Vysypat celý koš</button>' : ''}
+    <button class="hl-btn" data-akce="zavri"><svg class="icon"><use href="#i-krizek"/></svg></button>
+  </div>
+  <div class="s-telo">
+    <p style="font-size:12.5px;color:var(--khaki);margin:0 0 14px">
+      Smazané věci tady čekají, dokud je někdo nevyhodí natrvalo. Přílohy zůstávají
+      i se soubory — teprve vyhození z koše je smaže z úložiště.</p>
+    ${polozky.length ? polozky.map((z) => `
+      <div class="blok" style="margin-bottom:10px">
+        <div class="blok-hl">
+          <h4>${esc(popisKose(z.misto))}</h4>
+          <div class="mezera"></div>
+          <span style="font:500 11.5px var(--mono);color:var(--khaki-tm)">${esc(z.kdo || '')} ${kdyKratce(z.kdy || nyni())}</span>
+        </div>
+        <div class="seznam-radek" style="border:0;padding-top:0">
+          <span style="flex:1"><b>${esc(z.nazev)}</b>${z.vuzId && vuz(z.vuzId) ? `<span style="color:var(--khaki)"> · ${esc(vuz(z.vuzId).nazev)}</span>` : ''}</span>
+          <button class="btn mala" data-akce="kos-vrat" data-id="${z.id}"><svg class="icon"><use href="#i-obnovit"/></svg>Vrátit</button>
+          <button class="btn mala nic pozor" data-akce="kos-vyhod" data-id="${z.id}" title="Smazat natrvalo"><svg class="icon"><use href="#i-kos"/></svg></button>
+        </div>
+      </div>`).join('') : '<div class="prazdno">Koš je prázdný — nic se neztratilo.</div>'}
   </div>`;
 }
 
@@ -2185,8 +2330,13 @@ document.addEventListener('click', async (u) => {
     'rez-vydej': () => dialogKm(S.rezervace.find((r) => r.id === id), 'vydej'),
     'rez-vrat': () => dialogKm(S.rezervace.find((r) => r.id === id), 'vrat'),
     'rez-zrus': async () => {
-      if (!confirm('Zrušit tuhle rezervaci?')) return;
-      await ulozPolozku('Rezervace zrušena', SOUBORY.rezervace, id, (p) => { p.stav = 'zruseno'; });
+      const r = S.rezervace.find((x) => x.id === id);
+      const doKos = confirm(`Zrušit rezervaci ${jmenoRez(r)}?\n\nOK = uklidit do koše (půjde vrátit)\nZrušit = jen označit jako zrušenou a nechat v seznamu`);
+      if (doKos) {
+        await doKose('rezervace', r, () => uloz('Rezervace do koše', SOUBORY.rezervace, (d) => { d.polozky = d.polozky.filter((x) => x.id !== id); }));
+      } else {
+        await ulozPolozku('Rezervace zrušena', SOUBORY.rezervace, id, (p) => { p.stav = 'zruseno'; });
+      }
       zavriSuplik();
     },
     'uloz-rez': async () => {
@@ -2248,8 +2398,9 @@ document.addEventListener('click', async (u) => {
       const osirele = S.rezervace.filter((r) => r.stav !== 'zruseno' && (r.vozy || []).includes(o.id)
         && !(r.vozy || []).some((x) => x !== o.id && vuz(x) && (mazuPris || !jePris(vuz(x)))));
       if (osirele.length) return hlaska(`Nejde smazat: ${osirele.length} rezervací by zůstalo ${mazuPris ? 'prázdných' : 'bez vozu'}. Nejdřív je přepiš nebo zruš.`, 'chyba');
-      if (!confirm('Opravdu smazat celý vůz včetně servisky a vybavení? (Rezervace zůstanou.)')) return;
-      await uloz('Smazán vůz', SOUBORY.vozy, (d) => { d.vozy = d.vozy.filter((v) => v.id !== o.id); });
+      const co = vuz(o.id);
+      if (!confirm(`Přesunout „${co?.nazev}" do koše? (Rezervace zůstanou, vrátit to půjde z koše.)`)) return;
+      await doKose('vozy', co, () => uloz('Do koše: vůz', SOUBORY.vozy, (d) => { d.vozy = d.vozy.filter((v) => v.id !== o.id); }));
       zavriSuplik();
     },
     'uloz-zaklad': () => {
@@ -2261,27 +2412,36 @@ document.addEventListener('click', async (u) => {
 
     'pridej-pojisteni': () => ulozVuz('Nová pojistka', o.id, (v) => { v.pojisteni = v.pojisteni || []; v.pojisteni.push({ id: uid('po'), druh: '', spolecnost: '', cisloSmlouvy: '', rocne: null, platiDo: '', pozn: '' }); }),
     'uloz-pojisteni': () => ulozVuz('Pojistka upravena', o.id, (v) => { const p = v.pojisteni.find((x) => x.id === id); if (p) Object.assign(p, sesbirej(el.parentElement.closest('[data-id]'))); }),
-    'smaz-pojisteni': () => ulozVuz('Pojistka smazána', o.id, (v) => { v.pojisteni = v.pojisteni.filter((x) => x.id !== id); }),
+    'smaz-pojisteni': () => doKose('vuz:pojisteni', (vuz(o.id).pojisteni || []).find((x) => x.id === id),
+      () => ulozVuz('Pojistka do koše', o.id, (v) => { v.pojisteni = v.pojisteni.filter((x) => x.id !== id); }),
+      { vuzId: o.id, popisNavic: vuz(o.id)?.nazev }),
 
     'pridej-vybavu': () => ulozVuz('Věc do packu', o.id, (v) => { v.vybava = v.vybava || []; v.vybava.push({ id: uid('vb'), nazev: '', ks: 1, pozn: '' }); }),
     'uloz-vybavu': () => ulozVuz('Pack upraven', o.id, (v) => { const b = v.vybava.find((x) => x.id === id); if (b) Object.assign(b, sesbirej(el.parentElement.closest('[data-id]'))); }),
-    'smaz-vybavu': () => ulozVuz('Věc z packu smazána', o.id, (v) => { v.vybava = v.vybava.filter((x) => x.id !== id); }),
+    'smaz-vybavu': () => doKose('vuz:vybava', (vuz(o.id).vybava || []).find((x) => x.id === id),
+      () => ulozVuz('Věc z vybavení do koše', o.id, (v) => { v.vybava = v.vybava.filter((x) => x.id !== id); }),
+      { vuzId: o.id, popisNavic: vuz(o.id)?.nazev }),
 
     'pridej-servis': () => ulozVuz('Nový zápis servisky', o.id, (v) => { v.servis = v.servis || []; v.servis.push({ id: uid('se'), datum: dnesISO(), km: null, cena: null, popis: '', dokumenty: [] }); }),
     'uloz-servis': () => ulozVuz('Serviska upravena', o.id, (v) => { const z = v.servis.find((x) => x.id === id); if (z) Object.assign(z, sesbirej(el.parentElement.closest('[data-id]'))); }),
     'smaz-servis': async () => {
-      if (!confirm('Smazat zápis ze servisky? Přílohy zůstanou v archivu.')) return;
-      return ulozVuz('Zápis servisky smazán', o.id, (v) => { v.servis = v.servis.filter((x) => x.id !== id); });
+      if (!confirm('Přesunout zápis ze servisky do koše? Vrátit ho půjde i s přílohami.')) return;
+      return doKose('vuz:servis', (vuz(o.id).servis || []).find((x) => x.id === id),
+        () => ulozVuz('Zápis servisky do koše', o.id, (v) => { v.servis = v.servis.filter((x) => x.id !== id); }),
+        { vuzId: o.id, popisNavic: vuz(o.id)?.nazev });
     },
     'otevri-dok': () => otevriDokument(o.id, id, el.dataset.cesta),
     'smaz-dok': async () => {
       const z = (vuz(o.id)?.servis || []).find((s) => s.id === id);
       const cesta = el.dataset.cesta;
       const dok = z?.dokumenty?.find((d) => d.cesta === cesta);
-      if (!dok || !confirm(`Smazat přílohu ${dok.nazev}?`)) return;
-      try { await GH.smazSoubor(cesta, 'Smazána příloha ' + dok.nazev); } catch {}
-      /* mazat podle cesty, ne indexu — index se při souběhu rozjede */
-      return ulozVuz('Příloha smazána', o.id, (v) => { const zz = v.servis.find((s) => s.id === id); if (zz && zz.dokumenty) zz.dokumenty = zz.dokumenty.filter((d) => d.cesta !== cesta); });
+      if (!dok || !confirm(`Přesunout přílohu ${dok.nazev} do koše?`)) return;
+      /* Soubor v repu zůstává — smaže se teprve při vyhození z koše. */
+      const zaznamKose = { ...dok };
+      return doKose('vuz:dokument', zaznamKose,
+        /* mazat podle cesty, ne indexu — index se při souběhu rozjede */
+        () => ulozVuz('Příloha do koše', o.id, (v) => { const zz = v.servis.find((s) => s.id === id); if (zz && zz.dokumenty) zz.dokumenty = zz.dokumenty.filter((d) => d.cesta !== cesta); }),
+        { vuzId: o.id, popisNavic: vuz(o.id)?.nazev });
     },
 
     'pridej-tacho': async () => {
@@ -2291,17 +2451,22 @@ document.addEventListener('click', async (u) => {
       if (km === '' || Number.isNaN(+km)) return hlaska('Stav tachometru musí být číslo, např. 64100.', 'chyba');
       return ulozVuz('Zápis tachometru', o.id, (v) => { v.tachometr = v.tachometr || []; v.tachometr.push({ id: uid('ta'), datum: dnesISO(), km: +km, kdo: JA.jmeno, pozn: 'ruční zápis' }); });
     },
-    'smaz-tacho': () => ulozVuz('Zápis tachometru smazán', o.id, (v) => { v.tachometr = v.tachometr.filter((x) => x.id !== id); }),
+    'smaz-tacho': () => doKose('vuz:tachometr', (vuz(o.id).tachometr || []).find((x) => x.id === id),
+      () => ulozVuz('Zápis tachometru do koše', o.id, (v) => { v.tachometr = v.tachometr.filter((x) => x.id !== id); }),
+      { vuzId: o.id, popisNavic: vuz(o.id)?.nazev }),
 
     'pridej-milnik': () => ulozVuz('Nový milník', o.id, (v) => { v.milniky = v.milniky || []; v.milniky.push({ id: uid('mi'), nazev: '', typ: 'datum', hodnota: '', pozn: '' }); }),
     'uloz-milnik': () => ulozVuz('Milník upraven', o.id, (v) => { const m = v.milniky.find((x) => x.id === id); if (m) { const h = sesbirej(el.parentElement.closest('[data-id]')); if (h.typ === 'km') h.hodnota = h.hodnota === '' || h.hodnota == null ? null : +h.hodnota; Object.assign(m, h); } }),
-    'smaz-milnik': () => ulozVuz('Milník smazán', o.id, (v) => { v.milniky = v.milniky.filter((x) => x.id !== id); }),
+    'smaz-milnik': () => doKose('vuz:milniky', (vuz(o.id).milniky || []).find((x) => x.id === id),
+      () => ulozVuz('Milník do koše', o.id, (v) => { v.milniky = v.milniky.filter((x) => x.id !== id); }),
+      { vuzId: o.id, popisNavic: vuz(o.id)?.nazev }),
 
     'novy-kontakt': () => otevriSuplik({ typ: 'kontakt', id: null }),
     'uprav-kontakt': () => otevriSuplik({ typ: 'kontakt', id }),
     'smaz-kontakt': async () => {
-      if (!confirm('Smazat kontakt? Rezervace zůstanou, jen ztratí vazbu.')) return;
-      return uloz('Kontakt smazán', SOUBORY.kontakty, (d) => { d.polozky = d.polozky.filter((k) => k.id !== id); });
+      if (!confirm('Přesunout kontakt do koše? Rezervace zůstanou, jen ztratí vazbu.')) return;
+      return doKose('kontakty', kontakt(id),
+        () => uloz('Kontakt do koše', SOUBORY.kontakty, (d) => { d.polozky = d.polozky.filter((k) => k.id !== id); }));
     },
     'uloz-kontakt': async () => {
       const hodnoty = sesbirej($('#suplik .s-telo'));
@@ -2339,7 +2504,8 @@ document.addEventListener('click', async (u) => {
       const cil = S.ukoly.find((x) => x.id === id)?.stav === 'hotovy' ? 'otevreny' : 'hotovy';
       return ulozPolozku('Úkol přepnut', SOUBORY.ukoly, id, (p) => { p.stav = cil; p.hotovoKdy = cil === 'hotovy' ? nyni() : null; });
     },
-    'smaz-ukol': () => uloz('Úkol smazán', SOUBORY.ukoly, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== id); }),
+    'smaz-ukol': () => doKose('ukoly', S.ukoly.find((x) => x.id === id),
+      () => uloz('Úkol do koše', SOUBORY.ukoly, (d) => { d.polozky = (d.polozky || []).filter((x) => x.id !== id); })),
 
     'pridej-marketing': async () => {
       const nid = uid('mk');
@@ -2351,7 +2517,8 @@ document.addEventListener('click', async (u) => {
       dialogMarketing(S.finance.marketing.find((m) => m.id === nid));
     },
     'uprav-marketing': () => dialogMarketing((S.finance.marketing || []).find((m) => m.id === id)),
-    'smaz-marketing': () => uloz('Útrata smazána', SOUBORY.finance, (d) => { d.marketing = d.marketing.filter((m) => m.id !== id); }),
+    'smaz-marketing': () => doKose('marketing', (S.finance.marketing || []).find((m) => m.id === id),
+      () => uloz('Útrata do koše', SOUBORY.finance, (d) => { d.marketing = d.marketing.filter((m) => m.id !== id); })),
     'uloz-marketing-dialog': async () => {
       const hodnoty = sesbirej($('#rychly'));
       await uloz('Útrata marketingu upravena', SOUBORY.finance, (d) => { const m = d.marketing.find((x) => x.id === id); if (m) Object.assign(m, hodnoty); });
@@ -2381,8 +2548,9 @@ document.addEventListener('click', async (u) => {
       $('#rychly').close();
     },
     'smaz-investici': async () => {
-      if (!confirm('Smazat tenhle vklad?')) return;
-      return uloz('Vklad smazán', SOUBORY.finance, (d) => { d.investice = d.investice.filter((i) => i.id !== id); });
+      if (!confirm('Přesunout vklad do koše?')) return;
+      return doKose('investice', (S.finance.investice || []).find((i) => i.id === id),
+        () => uloz('Vklad do koše', SOUBORY.finance, (d) => { d.investice = d.investice.filter((i) => i.id !== id); }));
     },
 
     /* Uložení překreslí celou plochu, takže se před zápisem seberou i ostatní
@@ -2404,14 +2572,31 @@ document.addEventListener('click', async (u) => {
     },
     'smaz-basic': () => {
       const rozepsane = sesbirejBasic();
-      return uloz('Basic vybavení zkráceno', SOUBORY.nastaveni, (d) => {
+      const klic = el.dataset.klic;
+      const co = (S.nastaveni.basicVybaveni?.[klic] || []).find((y) => y.id === id);
+      return doKose(`basic:${klic}`, co, () => uloz('Basic vybavení do koše', SOUBORY.nastaveni, (d) => {
         d.basicVybaveni = vlozBasic(d.basicVybaveni, rozepsane);
-        const klic = el.dataset.klic;
         if (d.basicVybaveni[klic]) d.basicVybaveni[klic] = d.basicVybaveni[klic].filter((y) => y.id !== id);
-      });
+      }));
     },
 
     'na-prislusenstvi': () => { zavriSuplik(); UI.zalozka = 'prislusenstvi'; localStorage.setItem('poutnik.zalozka', UI.zalozka); vykresli(); },
+    'kos-vrat': () => zKose(S.kos.find((x) => x.id === id)),
+    'kos-vyhod': async () => {
+      const z = S.kos.find((x) => x.id === id);
+      if (!z || !confirm(`Smazat „${z.nazev}" natrvalo? Tohle už vrátit nepůjde.`)) return;
+      return vyhodZKose(z);
+    },
+    'vysyp-kos': async () => {
+      if (!confirm(`Vyhodit všech ${S.kos.length} věcí z koše natrvalo? Tohle už vrátit nepůjde.`)) return;
+      for (const z of [...S.kos]) {
+        if (z.misto === 'vuz:dokument' && z.data?.cesta) {
+          try { await GH.smazSoubor(z.data.cesta, 'Vysypán koš'); } catch { /* už není */ }
+        }
+      }
+      return uloz('Koš vysypán', SOUBORY.kos, (d) => { d.polozky = []; });
+    },
+
     'nacti-gps': () => nactiZGps(),
     'nacti-web': () => nactiPoptavkyZWebu(),
     'porovnat-web': () => porovnejSWebem(),
@@ -2424,9 +2609,21 @@ document.addEventListener('click', async (u) => {
     'uloz-nastaveni': () => {
       const hodnoty = sesbirej(el.closest('.blok'));
       return uloz('Nastavení upraveno', SOUBORY.nastaveni, (d) => {
-        d.partneri = [hodnoty.partner0 || 'Parťák 1', hodnoty.partner1 || 'Parťák 2'];
+        const jmena = [hodnoty.partner0 || 'Parťák 1', hodnoty.partner1 || 'Parťák 2'];
+        d.partneri = jmena;
+        d.maily = { [jmena[0]]: hodnoty.mail0 || '', [jmena[1]]: hodnoty.mail1 || '' };
         d.kmDenOdhad = hodnoty.kmDenOdhad || 140;
         d.sazbaHodina = hodnoty.sazbaHodina || 0;
+      });
+    },
+    'uloz-upozorneni': () => {
+      const hodnoty = sesbirej(el.closest('.blok'));
+      return uloz('Upozornění nastavena', SOUBORY.nastaveni, (d) => {
+        d.upozorneni = {
+          zap: hodnoty.zap === 'true',
+          rannihlaseni: hodnoty.rannihlaseni === 'true',
+          kopie: hodnoty.kopie || '',
+        };
       });
     },
     'uloz-traccar': () => {
@@ -2472,6 +2669,7 @@ $('#btn-obnovit').addEventListener('click', async () => {
   catch (e) { hlaska(e.message, 'chyba'); }
   finally { if (!UI.ukladam) $('#btn-obnovit').classList.remove('tocise'); }
 });
+$('#btn-kos').addEventListener('click', () => otevriSuplik({ typ: 'kos' }));
 $('#btn-nastaveni').addEventListener('click', () => otevriSuplik({ typ: 'nastaveni' }));
 $('#btn-zvon').addEventListener('click', () => otevriSuplik({ typ: 'kontrolky' }));
 $('#btn-ja').addEventListener('click', () => otevriSuplik({ typ: 'nastaveni' }));
